@@ -104,8 +104,8 @@ async function readStdin(): Promise<string> {
   });
 }
 
-const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+const OUTPUT_START_MARKER = '---BIOCLAW_OUTPUT_START---';
+const OUTPUT_END_MARKER = '---BIOCLAW_OUTPUT_END---';
 
 function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);
@@ -271,7 +271,7 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
   lines.push('');
 
   for (const msg of messages) {
-    const sender = msg.role === 'user' ? 'User' : 'Andy';
+    const sender = msg.role === 'user' ? 'User' : 'Bio';
     const content = msg.content.length > 2000
       ? msg.content.slice(0, 2000) + '...'
       : msg.content;
@@ -390,12 +390,27 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
 
+  // BioClaw: inject biology-specific system context
+  const bioSystemPrompt = [
+    '## BioClaw — Biology Research Assistant',
+    '',
+    'You are Bio, an AI biology research assistant running inside an isolated container.',
+    'You have full access to bioinformatics tools: BLAST+, SAMtools, BEDTools, BWA, minimap2, FastQC, seqtk.',
+    'Python libraries: BioPython, pandas, NumPy, SciPy, matplotlib, seaborn, scikit-learn, RDKit, PyDESeq2, scanpy, pysam.',
+    '',
+    'When users ask biology questions, prefer running actual analysis over giving theoretical answers.',
+    'Write and execute Python scripts or bash commands to produce real results.',
+    'Save output files to /workspace/group/ so users can access them.',
+    '',
+  ].join('\n');
+
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
-  if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
-    globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
-  }
+  const globalContent = fs.existsSync(globalClaudeMdPath)
+    ? fs.readFileSync(globalClaudeMdPath, 'utf-8')
+    : '';
+  globalClaudeMd = bioSystemPrompt + globalContent;
 
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
@@ -420,9 +435,7 @@ async function runQuery(
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
-      systemPrompt: globalClaudeMd
-        ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
-        : undefined,
+      systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd || '' },
       allowedTools: [
         'Bash',
         'Read', 'Write', 'Edit', 'Glob', 'Grep',
@@ -442,9 +455,9 @@ async function runQuery(
           command: 'node',
           args: [mcpServerPath],
           env: {
-            NANOCLAW_CHAT_JID: containerInput.chatJid,
-            NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            BIOCLAW_CHAT_JID: containerInput.chatJid,
+            BIOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+            BIOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
       },

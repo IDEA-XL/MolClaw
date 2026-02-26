@@ -1,6 +1,6 @@
 import path from 'path';
 
-export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'Bio';
+export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'Bioclaw';
 export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 

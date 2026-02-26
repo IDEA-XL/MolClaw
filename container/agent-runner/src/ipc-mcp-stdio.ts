@@ -14,11 +14,12 @@ import { CronExpressionParser } from 'cron-parser';
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const FILES_DIR = path.join(IPC_DIR, 'files');
 
 // Context from environment variables (set by the agent runner)
-const chatJid = process.env.NANOCLAW_CHAT_JID!;
-const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
-const isMain = process.env.NANOCLAW_IS_MAIN === '1';
+const chatJid = process.env.BIOCLAW_CHAT_JID!;
+const groupFolder = process.env.BIOCLAW_GROUP_FOLDER!;
+const isMain = process.env.BIOCLAW_IS_MAIN === '1';
 
 function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
@@ -59,6 +60,43 @@ server.tool(
     writeIpcFile(MESSAGES_DIR, data);
 
     return { content: [{ type: 'text' as const, text: 'Message sent.' }] };
+  },
+);
+
+server.tool(
+  'send_image',
+  'Send an image file to the user or group. Use this after generating images (e.g., PyMOL renders, matplotlib plots). The file must exist on disk at the given path.',
+  {
+    file_path: z.string().describe('Absolute path to the image file inside the container (e.g., /workspace/group/output.png)'),
+    caption: z.string().optional().describe('Optional caption/description for the image'),
+  },
+  async (args) => {
+    const srcPath = args.file_path;
+    if (!fs.existsSync(srcPath)) {
+      return {
+        content: [{ type: 'text' as const, text: `File not found: ${srcPath}` }],
+        isError: true,
+      };
+    }
+
+    fs.mkdirSync(FILES_DIR, { recursive: true });
+    const ext = path.extname(srcPath) || '.png';
+    const destFilename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+    const destPath = path.join(FILES_DIR, destFilename);
+    fs.copyFileSync(srcPath, destPath);
+
+    const data = {
+      type: 'image',
+      chatJid,
+      filePath: `files/${destFilename}`,
+      caption: args.caption || undefined,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: `Image queued for sending: ${destFilename}` }] };
   },
 );
 
@@ -247,7 +285,7 @@ Use available_groups.json to find the JID for a group. The folder name should be
     jid: z.string().describe('The WhatsApp JID (e.g., "120363336345536173@g.us")'),
     name: z.string().describe('Display name for the group'),
     folder: z.string().describe('Folder name for group files (lowercase, hyphens, e.g., "family-chat")'),
-    trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
+    trigger: z.string().describe('Trigger word (e.g., "@Bio")'),
   },
   async (args) => {
     if (!isMain) {

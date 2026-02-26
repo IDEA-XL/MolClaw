@@ -3,8 +3,8 @@ import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 
 // Sentinel markers must match container-runner.ts
-const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+const OUTPUT_START_MARKER = '---BIOCLAW_OUTPUT_START---';
+const OUTPUT_END_MARKER = '---BIOCLAW_OUTPUT_END---';
 
 // Mock config
 vi.mock('./config.js', () => ({
@@ -87,7 +87,7 @@ import type { RegisteredGroup } from './types.js';
 const testGroup: RegisteredGroup = {
   name: 'Test Group',
   folder: 'test-group',
-  trigger: '@Andy',
+  trigger: '@Bio',
   added_at: new Date().toISOString(),
 };
 

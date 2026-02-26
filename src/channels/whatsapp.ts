@@ -6,6 +6,7 @@ import makeWASocket, {
   Browsers,
   DisconnectReason,
   WASocket,
+  fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
@@ -56,11 +57,21 @@ export class WhatsAppChannel implements Channel {
 
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
+    let version: [number, number, number] | undefined;
+    try {
+      const versionInfo = await fetchLatestBaileysVersion();
+      version = versionInfo.version;
+      logger.info({ version: version.join('.') }, 'Using WhatsApp version');
+    } catch (err) {
+      logger.warn({ err }, 'Failed to fetch latest WhatsApp version, using default');
+    }
+
     this.sock = makeWASocket({
       auth: {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
+      ...(version ? { version } : {}),
       printQRInTerminal: false,
       logger,
       browser: Browsers.macOS('Chrome'),
@@ -211,6 +222,20 @@ export class WhatsAppChannel implements Channel {
   async disconnect(): Promise<void> {
     this.connected = false;
     this.sock?.end(undefined);
+  }
+
+  async sendImage(jid: string, imagePath: string, caption?: string): Promise<void> {
+    if (!this.connected) {
+      logger.warn({ jid, imagePath }, 'WA disconnected, image not sent');
+      return;
+    }
+    try {
+      const imageBuffer = fs.readFileSync(imagePath);
+      await this.sock.sendMessage(jid, { image: imageBuffer, caption: caption || undefined });
+      logger.info({ jid, imagePath, caption: caption?.slice(0, 50) }, 'Image sent');
+    } catch (err) {
+      logger.error({ jid, imagePath, err }, 'Failed to send image');
+    }
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {

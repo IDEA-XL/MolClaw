@@ -132,7 +132,7 @@ describe('getMessagesSince', () => {
     const msgs = [
       { id: 'm1', content: 'first', ts: '2024-01-01T00:00:01.000Z', sender: 'Alice' },
       { id: 'm2', content: 'second', ts: '2024-01-01T00:00:02.000Z', sender: 'Bob' },
-      { id: 'm3', content: 'Andy: bot reply', ts: '2024-01-01T00:00:03.000Z', sender: 'Bot' },
+      { id: 'm3', content: 'Bio: bot reply', ts: '2024-01-01T00:00:03.000Z', sender: 'Bot' },
       { id: 'm4', content: 'third', ts: '2024-01-01T00:00:04.000Z', sender: 'Carol' },
     ];
     for (const m of msgs) {
@@ -148,20 +148,20 @@ describe('getMessagesSince', () => {
   });
 
   it('returns messages after the given timestamp', () => {
-    const msgs = getMessagesSince('group@g.us', '2024-01-01T00:00:02.000Z', 'Andy');
+    const msgs = getMessagesSince('group@g.us', '2024-01-01T00:00:02.000Z', 'Bio');
     // Should exclude m1, m2 (before/at timestamp), m3 (bot message)
     expect(msgs).toHaveLength(1);
     expect(msgs[0].content).toBe('third');
   });
 
   it('excludes messages from the assistant (content prefix)', () => {
-    const msgs = getMessagesSince('group@g.us', '2024-01-01T00:00:00.000Z', 'Andy');
-    const botMsgs = msgs.filter((m) => m.content.startsWith('Andy:'));
+    const msgs = getMessagesSince('group@g.us', '2024-01-01T00:00:00.000Z', 'Bio');
+    const botMsgs = msgs.filter((m) => m.content.startsWith('Bio:'));
     expect(botMsgs).toHaveLength(0);
   });
 
   it('returns all messages when sinceTimestamp is empty', () => {
-    const msgs = getMessagesSince('group@g.us', '', 'Andy');
+    const msgs = getMessagesSince('group@g.us', '', 'Bio');
     // 3 user messages (bot message excluded)
     expect(msgs).toHaveLength(3);
   });
@@ -177,7 +177,7 @@ describe('getNewMessages', () => {
     const msgs = [
       { id: 'a1', chat: 'group1@g.us', content: 'g1 msg1', ts: '2024-01-01T00:00:01.000Z' },
       { id: 'a2', chat: 'group2@g.us', content: 'g2 msg1', ts: '2024-01-01T00:00:02.000Z' },
-      { id: 'a3', chat: 'group1@g.us', content: 'Andy: reply', ts: '2024-01-01T00:00:03.000Z' },
+      { id: 'a3', chat: 'group1@g.us', content: 'Bio: reply', ts: '2024-01-01T00:00:03.000Z' },
       { id: 'a4', chat: 'group1@g.us', content: 'g1 msg2', ts: '2024-01-01T00:00:04.000Z' },
     ];
     for (const m of msgs) {
@@ -196,9 +196,9 @@ describe('getNewMessages', () => {
     const { messages, newTimestamp } = getNewMessages(
       ['group1@g.us', 'group2@g.us'],
       '2024-01-01T00:00:00.000Z',
-      'Andy',
+      'Bio',
     );
-    // Excludes 'Andy: reply', returns 3 messages
+    // Excludes 'Bio: reply', returns 3 messages
     expect(messages).toHaveLength(3);
     expect(newTimestamp).toBe('2024-01-01T00:00:04.000Z');
   });
@@ -207,7 +207,7 @@ describe('getNewMessages', () => {
     const { messages } = getNewMessages(
       ['group1@g.us', 'group2@g.us'],
       '2024-01-01T00:00:02.000Z',
-      'Andy',
+      'Bio',
     );
     // Only g1 msg2 (after ts, not bot)
     expect(messages).toHaveLength(1);
@@ -215,7 +215,7 @@ describe('getNewMessages', () => {
   });
 
   it('returns empty for no registered groups', () => {
-    const { messages, newTimestamp } = getNewMessages([], '', 'Andy');
+    const { messages, newTimestamp } = getNewMessages([], '', 'Bio');
     expect(messages).toHaveLength(0);
     expect(newTimestamp).toBe('');
   });
