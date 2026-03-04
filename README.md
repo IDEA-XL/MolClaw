@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./bioclaw_logo.jpg" width="200">
+
 
 # BioClaw
 
