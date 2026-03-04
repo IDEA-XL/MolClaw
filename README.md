@@ -22,6 +22,7 @@ Built on the [NanoClaw](https://github.com/qwibitai/nanoclaw) architecture with 
 ## Contents
 
 - [Overview](#overview)
+- [Screenshots](#screenshots)
 - [Demo Examples](#demo-examples)
 - [System Architecture](#system-architecture)
 - [Included Tools](#included-tools)
@@ -44,6 +45,24 @@ The rapid growth of biomedical data, tools, and literature has created a fragmen
 - **Workspace Management** — Triage files, recommend analysis steps, and manage shared group workspaces
 
 Results — including images, plots, and structured reports — are delivered directly back to the chat.
+
+## Screenshots
+
+**Protein structure rendering** — Load PDB 1UBQ (Ubiquitin) as a high-res rainbow cartoon:
+
+<img src="docs/images/pymol-ubiquitin-cartoon.png" width="600" />
+
+**Hydrogen bond analysis** — Visualize hydrogen bonds between a ligand and protein in PDB 1M17:
+
+<img src="docs/images/pymol-hydrogen-bonds-en.png" width="600" />
+
+**Binding site visualization** — Show residues within 5Å of ligand AQ4 in PDB 1M17:
+
+<img src="docs/images/pymol-binding-site.png" width="600" />
+
+**Structure alignment** — Align 1UBQ and 1UBI, colored cyan and magenta (RMSD = 0.101 Å):
+
+<img src="docs/images/pymol-structure-alignment.png" width="600" />
 
 ## Demo Examples
 
