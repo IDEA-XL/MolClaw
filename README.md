@@ -26,7 +26,7 @@ Welcome to join our WeChat group to discuss and exchange ideas! Scan the QR code
 <p align="center">
   <img src="wechat_group.jpg" width="50%" alt="WeChat Group QR Code"/>
   <br/>
-  <em>Scan to join the Edit Banana community</em>
+  <em>Scan to join the BioClaw community</em>
 </p>
 
 ## Contents
