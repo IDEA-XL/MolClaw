@@ -118,6 +118,29 @@ Start BioClaw:
 npx tsx src/index.ts
 ```
 
+## Second Quick Start
+
+Install from GitHub:
+
+```bash
+git clone https://github.com/Runchuan-BU/BioClaw.git
+cd BioClaw
+npm install
+docker build -t bioclaw-agent:latest container/
+```
+
+If you want the bot name to be `OpenClaw`, set:
+
+```bash
+export ASSISTANT_NAME=OpenClaw
+```
+
+Just send the message to OpenClaw:
+
+```text
+@OpenClaw BLAST this sequence against nr: ATGCGATCGATCG...
+```
+
 ### Group Management
 
 ```bash
