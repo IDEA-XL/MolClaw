@@ -182,14 +182,27 @@ function buildVolumeMounts(
 }
 
 /**
- * Read allowed secrets from .env for passing to the container via stdin.
- * Secrets are never written to disk or mounted as files.
+ * Read allowed provider config from .env for passing to the container via stdin.
+ * Sensitive values are never written to disk or mounted as files.
  */
 function readSecrets(): Record<string, string> {
   const envFile = path.join(process.cwd(), '.env');
   if (!fs.existsSync(envFile)) return {};
 
-  const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+  const allowedVars = [
+    'OPENAI_COMPAT_BASE_URL',
+    'OPENAI_COMPAT_API_KEY',
+    'OPENAI_COMPAT_MODEL',
+    'OPENAI_COMPAT_MAX_TOKENS',
+    'OPENAI_COMPAT_TEMPERATURE',
+    'OPENAI_COMPAT_THINKING_TYPE',
+    'LLM_BASE_URL',
+    'LLM_API_KEY',
+    'LLM_MODEL',
+    'LLM_MAX_TOKENS',
+    'LLM_TEMPERATURE',
+    'LLM_THINKING_TYPE',
+  ];
   const secrets: Record<string, string> = {};
   const content = fs.readFileSync(envFile, 'utf-8');
 

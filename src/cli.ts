@@ -70,7 +70,20 @@ function readSecrets(): Record<string, string> {
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
-    if (['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'].includes(key) && value) {
+    if ([
+      'OPENAI_COMPAT_BASE_URL',
+      'OPENAI_COMPAT_API_KEY',
+      'OPENAI_COMPAT_MODEL',
+      'OPENAI_COMPAT_MAX_TOKENS',
+      'OPENAI_COMPAT_TEMPERATURE',
+      'OPENAI_COMPAT_THINKING_TYPE',
+      'LLM_BASE_URL',
+      'LLM_API_KEY',
+      'LLM_MODEL',
+      'LLM_MAX_TOKENS',
+      'LLM_TEMPERATURE',
+      'LLM_THINKING_TYPE',
+    ].includes(key) && value) {
       secrets[key] = value;
     }
   }
@@ -161,7 +174,7 @@ async function main() {
   console.log('');
   console.log('========================================');
   console.log('  BioClaw - Biology Research Assistant');
-  console.log('  CLI Test Mode (Docker + Claude Agent)');
+  console.log('  CLI Test Mode (Docker + Container Agent)');
   console.log('========================================');
   console.log('');
   console.log('Type a biology question or task. Type "exit" to quit.');

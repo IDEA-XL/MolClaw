@@ -7,6 +7,7 @@
  * Usage: npx tsx src/whatsapp-auth.ts
  * Pairing code: npx tsx src/whatsapp-auth.ts --pairing-code --phone 14155551234
  */
+import dns from 'node:dns';
 import fs from 'fs';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
@@ -20,9 +21,19 @@ import makeWASocket, {
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 
+import {
+  configureGlobalFetchProxy,
+  createFetchProxyDispatcher,
+  createSocketProxyAgent,
+  getConfiguredProxyUrl,
+  maskProxyUrl,
+} from './proxy.js';
+
 const AUTH_DIR = './store/auth';
 const QR_FILE = './store/qr-data.txt';
 const STATUS_FILE = './store/auth-status.txt';
+
+dns.setDefaultResultOrder('ipv4first');
 
 const logger = pino({
   level: 'warn',
@@ -66,6 +77,14 @@ async function connectSocket(phoneNumber?: string): Promise<void> {
     console.warn('Failed to fetch latest version, using default:', err.message);
   }
 
+  const proxyUrl = getConfiguredProxyUrl();
+  configureGlobalFetchProxy();
+  const proxyAgent = createSocketProxyAgent();
+  const fetchDispatcher = createFetchProxyDispatcher();
+  if (proxyUrl) {
+    console.log(`Using proxy: ${maskProxyUrl(proxyUrl)}`);
+  }
+
   const sock = makeWASocket({
     auth: {
       creds: state.creds,
@@ -75,7 +94,10 @@ async function connectSocket(phoneNumber?: string): Promise<void> {
     printQRInTerminal: false,
     logger,
     browser: Browsers.macOS('Chrome'),
-  });
+    connectTimeoutMs: 60_000,
+    ...(proxyAgent ? { agent: proxyAgent } : {}),
+    ...(fetchDispatcher ? { fetchAgent: fetchDispatcher as any } : {}),
+  } as any);
 
   if (usePairingCode && phoneNumber && !pairingCodeRequested) {
     pairingCodeRequested = true;

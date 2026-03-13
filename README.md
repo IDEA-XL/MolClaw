@@ -15,7 +15,7 @@
 
 **BioClaw** brings the power of computational biology directly into WhatsApp group chats. Researchers can run BLAST searches, render protein structures, generate publication-quality plots, perform sequencing QC, and search the literature — all through natural language messages.
 
-Built on the [NanoClaw](https://github.com/qwibitai/nanoclaw) architecture with bioinformatics tools and skills from the [STELLA](https://github.com/zaixizhang/STELLA) project, powered by the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents-sdk).
+Built on the [NanoClaw](https://github.com/qwibitai/nanoclaw) architecture with bioinformatics tools and skills from the [STELLA](https://github.com/zaixizhang/STELLA) project, powered by a containerized tool-using agent runtime over an OpenAI-compatible chat completions API.
 
 </div>
 
@@ -62,7 +62,7 @@ Results — including images, plots, and structured reports — are delivered di
 - macOS or Linux
 - Node.js 20+
 - Docker Desktop
-- Anthropic API key
+- OpenAI-compatible API key and base URL
 
 ### Installation
 
@@ -76,7 +76,10 @@ npm install
 
 # Configure environment
 cp .env.example .env
-# Edit .env with your Anthropic API key and WhatsApp credentials
+# Edit .env with your provider base URL, API key, and model, for example:
+# OPENAI_COMPAT_BASE_URL=https://openapi.dp.tech/openapi/v1
+# OPENAI_COMPAT_API_KEY=your-key
+# OPENAI_COMPAT_MODEL=openapi/claude-4.5-sonnet
 
 # Start BioClaw
 npm start
@@ -179,7 +182,7 @@ BioClaw is built on the [NanoClaw](https://github.com/qwibitai/nanoclaw) contain
 ```
 WhatsApp ──► Node.js Orchestrator ──► SQLite (state) ──► Docker Container
                                                               │
-                                                     Claude Agent SDK
+                                               OpenAI-Compatible Model API
                                                               │
                                                    ┌──────────┴──────────┐
                                                    │   Bioinformatics    │
@@ -245,7 +248,7 @@ The bioinformatics tool suite and domain-specific skills — including sequence 
 - macOS or Linux
 - Node.js 20+
 - Docker Desktop
-- Anthropic API key
+- OpenAI-compatible API key and base URL
 
 ### Installation
 
@@ -259,7 +262,7 @@ npm install
 
 # Configure environment
 cp .env.example .env
-# Edit .env with your Anthropic API key
+# Edit .env with your provider base URL, API key, and model
 
 # Build the agent Docker image
 docker build -t bioclaw-agent:latest container/
@@ -312,7 +315,6 @@ BioClaw builds upon the STELLA framework. If you use BioClaw in your research, p
 
 - [STELLA](https://github.com/zaixizhang/STELLA) — Self-Evolving LLM Agent for Biomedical Research
 - [NanoClaw](https://github.com/qwibitai/nanoclaw) — Lightweight container-based agent architecture
-- [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents-sdk) — Anthropic's SDK for building AI agents
 
 ## Acknowledgments
 

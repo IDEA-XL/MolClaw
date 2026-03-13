@@ -1,23 +1,19 @@
 /**
  * BioClaw Agent Runner
- * Runs inside a container, receives config via stdin, outputs result to stdout
+ * Runs inside a container, receives config via stdin, outputs result to stdout.
  *
- * Input protocol:
- *   Stdin: Full ContainerInput JSON (read until EOF, like before)
- *   IPC:   Follow-up messages written as JSON files to /workspace/ipc/input/
- *          Files: {type:"message", text:"..."}.json — polled and consumed
- *          Sentinel: /workspace/ipc/input/_close — signals session end
- *
- * Stdout protocol:
- *   Each result is wrapped in OUTPUT_START_MARKER / OUTPUT_END_MARKER pairs.
- *   Multiple results may be emitted (one per agent teams result).
- *   Final marker after loop ends signals completion.
+ * This runner talks to an OpenAI-compatible `/chat/completions` endpoint and
+ * implements a small tool runtime directly, so BioClaw can work with gateway
+ * providers instead of Anthropic's SDK.
  */
 
+import { exec as execCallback } from 'child_process';
+import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
-import { fileURLToPath } from 'url';
+import { promisify } from 'util';
+
+import { CronExpressionParser } from 'cron-parser';
 
 interface ContainerInput {
   prompt: string;
@@ -36,63 +32,344 @@ interface ContainerOutput {
   error?: string;
 }
 
-interface SessionEntry {
+interface ToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+interface ChatMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | null;
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+interface SessionState {
   sessionId: string;
-  fullPath: string;
-  summary: string;
-  firstPrompt: string;
+  messages: ChatMessage[];
+  createdAt: string;
+  updatedAt: string;
 }
 
-interface SessionsIndex {
-  entries: SessionEntry[];
+interface ChatCompletionResponse {
+  choices?: Array<{
+    message?: {
+      role?: string;
+      content?: unknown;
+      tool_calls?: ToolCall[];
+    };
+  }>;
+  error?: {
+    message?: string;
+    type?: string;
+  };
 }
 
-interface SDKUserMessage {
-  type: 'user';
-  message: { role: 'user'; content: string };
-  parent_tool_use_id: null;
-  session_id: string;
+interface ProviderConfig {
+  apiKey: string;
+  apiUrl: string;
+  model: string;
+  maxTokens: number;
+  temperature: number;
+  thinkingType?: string;
 }
 
-const IPC_INPUT_DIR = '/workspace/ipc/input';
+interface ToolContext {
+  containerInput: ContainerInput;
+  readableRoots: string[];
+  writableRoots: string[];
+}
+
+interface JsonSchema {
+  type: 'object';
+  properties: Record<string, unknown>;
+  required?: string[];
+}
+
+interface ToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: JsonSchema;
+  };
+}
+
+const exec = promisify(execCallback);
+
+const OUTPUT_START_MARKER = '---BIOCLAW_OUTPUT_START---';
+const OUTPUT_END_MARKER = '---BIOCLAW_OUTPUT_END---';
+
+const IPC_DIR = '/workspace/ipc';
+const IPC_INPUT_DIR = path.join(IPC_DIR, 'input');
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
+const FILES_DIR = path.join(IPC_DIR, 'files');
+const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
+const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const SESSION_DIR = '/home/node/.claude/openai-sessions';
+const CONVERSATIONS_DIR = '/workspace/group/conversations';
+const MAX_TOOL_ROUNDS = 24;
+const MAX_TOOL_OUTPUT_CHARS = 16_000;
+const MAX_FILE_READ_CHARS = 24_000;
+const TOOL_ENV_VARS = [
+  'OPENAI_COMPAT_API_KEY',
+  'OPENAI_COMPAT_BASE_URL',
+  'OPENAI_COMPAT_MODEL',
+  'OPENAI_COMPAT_MAX_TOKENS',
+  'OPENAI_COMPAT_TEMPERATURE',
+  'OPENAI_COMPAT_THINKING_TYPE',
+  'LLM_API_KEY',
+  'LLM_BASE_URL',
+  'LLM_MODEL',
+  'LLM_MAX_TOKENS',
+  'LLM_TEMPERATURE',
+  'LLM_THINKING_TYPE',
+  'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+];
 
-/**
- * Push-based async iterable for streaming user messages to the SDK.
- * Keeps the iterable alive until end() is called, preventing isSingleUserTurn.
- */
-class MessageStream {
-  private queue: SDKUserMessage[] = [];
-  private waiting: (() => void) | null = null;
-  private done = false;
+const TOOL_DEFINITIONS: ToolDefinition[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'bash',
+      description:
+        'Run a bash command inside /workspace/group. Use this for bioinformatics tools, Python scripts, network requests, and filesystem operations.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'The bash command to execute.' },
+          timeout_sec: {
+            type: 'integer',
+            description: 'Optional timeout in seconds. Defaults to 120.',
+          },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read a text file from the workspace.',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: 'Absolute or workspace-relative file path.' },
+          start_line: { type: 'integer', description: 'Optional 1-based start line.' },
+          end_line: { type: 'integer', description: 'Optional 1-based end line.' },
+        },
+        required: ['file_path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'write_file',
+      description: 'Write a UTF-8 text file. Creates parent directories if needed.',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: 'Absolute or workspace-relative file path.' },
+          content: { type: 'string', description: 'Full file contents to write.' },
+        },
+        required: ['file_path', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'edit_file',
+      description:
+        'Replace text in a UTF-8 file. By default exactly one match must exist; set replace_all=true to replace every match.',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: 'Absolute or workspace-relative file path.' },
+          old_text: { type: 'string', description: 'Exact text to replace.' },
+          new_text: { type: 'string', description: 'Replacement text.' },
+          replace_all: { type: 'boolean', description: 'Replace all matches instead of exactly one.' },
+        },
+        required: ['file_path', 'old_text', 'new_text'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_files',
+      description:
+        'List files and directories under a path. Use recursive=true to walk subdirectories.',
+      parameters: {
+        type: 'object',
+        properties: {
+          dir_path: { type: 'string', description: 'Directory to inspect. Defaults to /workspace/group.' },
+          recursive: { type: 'boolean', description: 'Whether to recurse into subdirectories.' },
+          pattern: { type: 'string', description: 'Optional glob-like pattern using * and ?.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'grep_files',
+      description:
+        'Search text files for a regex pattern and return matching lines.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'JavaScript regex pattern.' },
+          dir_path: { type: 'string', description: 'Directory or file to search. Defaults to /workspace/group.' },
+          file_pattern: { type: 'string', description: 'Optional glob-like file filter using * and ?.' },
+          case_insensitive: { type: 'boolean', description: 'Whether the regex should be case-insensitive.' },
+        },
+        required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'send_message',
+      description:
+        "Send a message to the user or group immediately while you're still working.",
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'The message to send.' },
+          sender: { type: 'string', description: 'Optional sender label.' },
+        },
+        required: ['text'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'send_image',
+      description:
+        'Send an image file to the user or group after you generate it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: 'Absolute or workspace-relative path to the image file.' },
+          caption: { type: 'string', description: 'Optional caption.' },
+        },
+        required: ['file_path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'schedule_task',
+      description:
+        'Schedule a recurring or one-time task. Use context_mode=group when the task depends on prior conversation context.',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string' },
+          schedule_type: {
+            type: 'string',
+            description: 'cron, interval, or once',
+            enum: ['cron', 'interval', 'once'],
+          },
+          schedule_value: { type: 'string' },
+          context_mode: {
+            type: 'string',
+            description: 'group or isolated',
+            enum: ['group', 'isolated'],
+          },
+          target_group_jid: { type: 'string' },
+        },
+        required: ['prompt', 'schedule_type', 'schedule_value'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_tasks',
+      description: 'List scheduled tasks visible to the current group.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pause_task',
+      description: 'Pause a scheduled task.',
+      parameters: {
+        type: 'object',
+        properties: {
+          task_id: { type: 'string' },
+        },
+        required: ['task_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'resume_task',
+      description: 'Resume a paused task.',
+      parameters: {
+        type: 'object',
+        properties: {
+          task_id: { type: 'string' },
+        },
+        required: ['task_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'cancel_task',
+      description: 'Cancel and delete a scheduled task.',
+      parameters: {
+        type: 'object',
+        properties: {
+          task_id: { type: 'string' },
+        },
+        required: ['task_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'register_group',
+      description:
+        'Register a new WhatsApp group so the agent can respond there. Main group only.',
+      parameters: {
+        type: 'object',
+        properties: {
+          jid: { type: 'string' },
+          name: { type: 'string' },
+          folder: { type: 'string' },
+          trigger: { type: 'string' },
+        },
+        required: ['jid', 'name', 'folder', 'trigger'],
+      },
+    },
+  },
+];
 
-  push(text: string): void {
-    this.queue.push({
-      type: 'user',
-      message: { role: 'user', content: text },
-      parent_tool_use_id: null,
-      session_id: '',
-    });
-    this.waiting?.();
-  }
-
-  end(): void {
-    this.done = true;
-    this.waiting?.();
-  }
-
-  async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
-    while (true) {
-      while (this.queue.length > 0) {
-        yield this.queue.shift()!;
-      }
-      if (this.done) return;
-      await new Promise<void>(r => { this.waiting = r; });
-      this.waiting = null;
-    }
-  }
-}
+type ToolExecutor = (args: Record<string, unknown>, context: ToolContext) => Promise<unknown>;
 
 async function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -104,9 +381,6 @@ async function readStdin(): Promise<string> {
   });
 }
 
-const OUTPUT_START_MARKER = '---BIOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---BIOCLAW_OUTPUT_END---';
-
 function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);
   console.log(JSON.stringify(output));
@@ -117,169 +391,427 @@ function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
 
-function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
-  const projectDir = path.dirname(transcriptPath);
-  const indexPath = path.join(projectDir, 'sessions-index.json');
+function truncate(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, maxChars)}\n...[truncated ${text.length - maxChars} chars]`;
+}
 
-  if (!fs.existsSync(indexPath)) {
-    log(`Sessions index not found at ${indexPath}`);
+function ensureString(value: unknown, fieldName: string): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+  return value;
+}
+
+function ensureBoolean(value: unknown, defaultValue = false): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  return defaultValue;
+}
+
+function ensureInteger(
+  value: unknown,
+  fieldName: string,
+  defaultValue: number,
+  min: number,
+  max: number,
+): number {
+  if (value === undefined || value === null || value === '') {
+    return defaultValue;
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    throw new Error(`${fieldName} must be an integer`);
+  }
+  if (value < min || value > max) {
+    throw new Error(`${fieldName} must be between ${min} and ${max}`);
+  }
+  return value;
+}
+
+function normalizeBaseUrl(baseUrl: string): string {
+  const trimmed = baseUrl.trim().replace(/\/+$/, '');
+  if (trimmed.endsWith('/chat/completions')) {
+    return trimmed;
+  }
+  return `${trimmed}/chat/completions`;
+}
+
+function readConfigValue(containerInput: ContainerInput, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = containerInput.secrets?.[key] ?? process.env[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function parseNumberConfig(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function loadProviderConfig(containerInput: ContainerInput): ProviderConfig {
+  const apiKey = readConfigValue(containerInput, ['OPENAI_COMPAT_API_KEY', 'LLM_API_KEY']);
+  const baseUrl = readConfigValue(containerInput, ['OPENAI_COMPAT_BASE_URL', 'LLM_BASE_URL']);
+  const model = readConfigValue(containerInput, ['OPENAI_COMPAT_MODEL', 'LLM_MODEL'])
+    || 'openapi/claude-4.5-sonnet';
+
+  if (!apiKey) {
+    throw new Error('Missing OPENAI_COMPAT_API_KEY in .env');
+  }
+
+  if (!baseUrl) {
+    throw new Error('Missing OPENAI_COMPAT_BASE_URL in .env');
+  }
+
+  return {
+    apiKey,
+    apiUrl: normalizeBaseUrl(baseUrl),
+    model,
+    maxTokens: parseNumberConfig(
+      readConfigValue(containerInput, ['OPENAI_COMPAT_MAX_TOKENS', 'LLM_MAX_TOKENS']),
+      4096,
+    ),
+    temperature: parseNumberConfig(
+      readConfigValue(containerInput, ['OPENAI_COMPAT_TEMPERATURE', 'LLM_TEMPERATURE']),
+      0.2,
+    ),
+    thinkingType: readConfigValue(containerInput, ['OPENAI_COMPAT_THINKING_TYPE', 'LLM_THINKING_TYPE']),
+  };
+}
+
+function createToolContext(containerInput: ContainerInput): ToolContext {
+  const readableRoots = [
+    '/workspace/group',
+    '/workspace/global',
+    '/workspace/extra',
+    '/workspace/ipc',
+  ];
+  const writableRoots = ['/workspace/group'];
+
+  if (containerInput.isMain) {
+    readableRoots.push('/workspace/project');
+    writableRoots.push('/workspace/project');
+  }
+
+  return {
+    containerInput,
+    readableRoots,
+    writableRoots,
+  };
+}
+
+function ensureAllowedPath(
+  rawPath: string,
+  roots: string[],
+): string {
+  const resolved = path.resolve(rawPath.startsWith('/') ? rawPath : path.join('/workspace/group', rawPath));
+  const allowed = roots.some(root => resolved === root || resolved.startsWith(`${root}${path.sep}`));
+  if (!allowed) {
+    throw new Error(`Path is outside allowed roots: ${resolved}`);
+  }
+  return resolved;
+}
+
+function isProbablyText(content: Buffer): boolean {
+  return !content.includes(0);
+}
+
+function loadTextFile(filePath: string): string {
+  const buffer = fs.readFileSync(filePath);
+  if (!isProbablyText(buffer)) {
+    throw new Error(`File is not a text file: ${filePath}`);
+  }
+  return buffer.toString('utf-8');
+}
+
+function wildcardToRegExp(pattern: string): RegExp {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
+  return new RegExp(`^${escaped}$`);
+}
+
+function matchesPattern(name: string, pattern?: string): boolean {
+  if (!pattern) {
+    return true;
+  }
+  return wildcardToRegExp(pattern).test(name);
+}
+
+function collectPaths(targetPath: string, recursive: boolean, maxEntries = 400): string[] {
+  const results: string[] = [];
+
+  const visit = (currentPath: string): void => {
+    if (results.length >= maxEntries) {
+      return;
+    }
+
+    const stat = fs.statSync(currentPath);
+    results.push(currentPath);
+
+    if (!recursive || !stat.isDirectory()) {
+      return;
+    }
+
+    for (const entry of fs.readdirSync(currentPath)) {
+      if (results.length >= maxEntries) {
+        return;
+      }
+      visit(path.join(currentPath, entry));
+    }
+  };
+
+  visit(targetPath);
+  return results;
+}
+
+function writeIpcFile(dir: string, data: object): string {
+  fs.mkdirSync(dir, { recursive: true });
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+  const filepath = path.join(dir, filename);
+  const tempPath = `${filepath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
+  fs.renameSync(tempPath, filepath);
+  return filename;
+}
+
+function sessionFilePath(sessionId: string): string {
+  return path.join(SESSION_DIR, `${sessionId}.json`);
+}
+
+function loadSession(sessionId: string): SessionState | null {
+  const filePath = sessionFilePath(sessionId);
+  if (!fs.existsSync(filePath)) {
     return null;
   }
 
   try {
-    const index: SessionsIndex = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
-    const entry = index.entries.find(e => e.sessionId === sessionId);
-    if (entry?.summary) {
-      return entry.summary;
-    }
+    return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as SessionState;
   } catch (err) {
-    log(`Failed to read sessions index: ${err instanceof Error ? err.message : String(err)}`);
+    log(`Failed to load session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
   }
-
-  return null;
 }
 
-/**
- * Archive the full transcript to conversations/ before compaction.
- */
-function createPreCompactHook(): HookCallback {
-  return async (input, _toolUseId, _context) => {
-    const preCompact = input as PreCompactHookInput;
-    const transcriptPath = preCompact.transcript_path;
-    const sessionId = preCompact.session_id;
-
-    if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-      log('No transcript found for archiving');
-      return {};
-    }
-
-    try {
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      const messages = parseTranscript(content);
-
-      if (messages.length === 0) {
-        log('No messages to archive');
-        return {};
-      }
-
-      const summary = getSessionSummary(sessionId, transcriptPath);
-      const name = summary ? sanitizeFilename(summary) : generateFallbackName();
-
-      const conversationsDir = '/workspace/group/conversations';
-      fs.mkdirSync(conversationsDir, { recursive: true });
-
-      const date = new Date().toISOString().split('T')[0];
-      const filename = `${date}-${name}.md`;
-      const filePath = path.join(conversationsDir, filename);
-
-      const markdown = formatTranscriptMarkdown(messages, summary);
-      fs.writeFileSync(filePath, markdown);
-
-      log(`Archived conversation to ${filePath}`);
-    } catch (err) {
-      log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    return {};
+function createSession(): SessionState {
+  const now = new Date().toISOString();
+  return {
+    sessionId: `session-${randomUUID()}`,
+    messages: [],
+    createdAt: now,
+    updatedAt: now,
   };
 }
 
-// Secrets to strip from Bash tool subprocess environments.
-// These are needed by claude-code for API auth but should never
-// be visible to commands Kit runs.
-const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
-
-function createSanitizeBashHook(): HookCallback {
-  return async (input, _toolUseId, _context) => {
-    const preInput = input as PreToolUseHookInput;
-    const command = (preInput.tool_input as { command?: string })?.command;
-    if (!command) return {};
-
-    const unsetPrefix = `unset ${SECRET_ENV_VARS.join(' ')} 2>/dev/null; `;
-    return {
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        updatedInput: {
-          ...(preInput.tool_input as Record<string, unknown>),
-          command: unsetPrefix + command,
-        },
-      },
-    };
-  };
+function saveSession(session: SessionState): void {
+  fs.mkdirSync(SESSION_DIR, { recursive: true });
+  session.updatedAt = new Date().toISOString();
+  fs.writeFileSync(sessionFilePath(session.sessionId), JSON.stringify(session, null, 2));
 }
 
-function sanitizeFilename(summary: string): string {
-  return summary
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 50);
-}
+function trimMessages(messages: ChatMessage[], maxChars = 140_000): ChatMessage[] {
+  const trimmed: ChatMessage[] = [];
+  let total = 0;
 
-function generateFallbackName(): string {
-  const time = new Date();
-  return `conversation-${time.getHours().toString().padStart(2, '0')}${time.getMinutes().toString().padStart(2, '0')}`;
-}
-
-interface ParsedMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-function parseTranscript(content: string): ParsedMessage[] {
-  const messages: ParsedMessage[] = [];
-
-  for (const line of content.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      const entry = JSON.parse(line);
-      if (entry.type === 'user' && entry.message?.content) {
-        const text = typeof entry.message.content === 'string'
-          ? entry.message.content
-          : entry.message.content.map((c: { text?: string }) => c.text || '').join('');
-        if (text) messages.push({ role: 'user', content: text });
-      } else if (entry.type === 'assistant' && entry.message?.content) {
-        const textParts = entry.message.content
-          .filter((c: { type: string }) => c.type === 'text')
-          .map((c: { text: string }) => c.text);
-        const text = textParts.join('');
-        if (text) messages.push({ role: 'assistant', content: text });
-      }
-    } catch {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const current = messages[i];
+    const size = JSON.stringify(current).length;
+    if (trimmed.length > 0 && total + size > maxChars) {
+      break;
     }
+    trimmed.unshift(current);
+    total += size;
   }
 
-  return messages;
+  return trimmed;
 }
 
-function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | null): string {
-  const now = new Date();
-  const formatDateTime = (d: Date) => d.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true
-  });
+function renderConversationArchive(session: SessionState): string {
+  const lines: string[] = [
+    `# Conversation ${session.sessionId}`,
+    '',
+    `Updated: ${session.updatedAt}`,
+    '',
+    '---',
+    '',
+  ];
 
-  const lines: string[] = [];
-  lines.push(`# ${title || 'Conversation'}`);
-  lines.push('');
-  lines.push(`Archived: ${formatDateTime(now)}`);
-  lines.push('');
-  lines.push('---');
-  lines.push('');
+  for (const message of session.messages) {
+    if (message.role === 'tool') {
+      lines.push(`**Tool (${message.name || 'unknown'})**`);
+      lines.push('');
+      lines.push('```text');
+      lines.push(truncate(message.content || '', 3000));
+      lines.push('```');
+      lines.push('');
+      continue;
+    }
 
-  for (const msg of messages) {
-    const sender = msg.role === 'user' ? 'User' : 'Bio';
-    const content = msg.content.length > 2000
-      ? msg.content.slice(0, 2000) + '...'
-      : msg.content;
-    lines.push(`**${sender}**: ${content}`);
+    if (message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0) {
+      const calledTools = message.tool_calls.map(toolCall => toolCall.function.name).join(', ');
+      lines.push(`**Assistant tool call**: ${calledTools}`);
+      lines.push('');
+      continue;
+    }
+
+    const title = message.role === 'user' ? 'User' : 'Assistant';
+    lines.push(`**${title}**`);
+    lines.push('');
+    lines.push(message.content || '');
     lines.push('');
   }
 
   return lines.join('\n');
+}
+
+function writeConversationArchive(session: SessionState): void {
+  fs.mkdirSync(CONVERSATIONS_DIR, { recursive: true });
+  const filePath = path.join(CONVERSATIONS_DIR, `${session.sessionId}.md`);
+  fs.writeFileSync(filePath, renderConversationArchive(session));
+}
+
+function extractTextContent(content: unknown): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') {
+          return part;
+        }
+        if (part && typeof part === 'object') {
+          const text = (part as { text?: unknown }).text;
+          return typeof text === 'string' ? text : JSON.stringify(part);
+        }
+        return '';
+      })
+      .join('\n')
+      .trim();
+  }
+
+  if (content && typeof content === 'object') {
+    const text = (content as { text?: unknown }).text;
+    if (typeof text === 'string') {
+      return text;
+    }
+    return JSON.stringify(content);
+  }
+
+  return '';
+}
+
+function loadPromptFragments(containerInput: ContainerInput): string[] {
+  const fragments: string[] = [];
+  const instructionFiles = ['/workspace/group/CLAUDE.md'];
+
+  if (containerInput.isMain) {
+    instructionFiles.unshift('/workspace/project/groups/global/CLAUDE.md');
+  } else {
+    instructionFiles.unshift('/workspace/global/CLAUDE.md');
+  }
+
+  if (fs.existsSync('/workspace/extra')) {
+    for (const entry of fs.readdirSync('/workspace/extra')) {
+      const candidate = path.join('/workspace/extra', entry, 'CLAUDE.md');
+      if (fs.existsSync(candidate)) {
+        instructionFiles.push(candidate);
+      }
+    }
+  }
+
+  for (const filePath of instructionFiles) {
+    if (!fs.existsSync(filePath)) {
+      continue;
+    }
+    fragments.push(`Instructions from ${filePath}:\n${fs.readFileSync(filePath, 'utf-8')}`);
+  }
+
+  return fragments;
+}
+
+function buildSystemPrompt(containerInput: ContainerInput): string {
+  const fragments = [
+    [
+      'You are Bio, an AI biology research assistant running inside an isolated container.',
+      'Prefer doing real analysis with tools over giving purely theoretical answers.',
+      'Use bash for BLAST, minimap2, BWA, FastQC, PyMOL, Python scripts, and network calls.',
+      'Use read_file/write_file/edit_file/list_files/grep_files for direct workspace access.',
+      'Use send_message for progress updates during long jobs.',
+      'Use send_image after generating plots or structure renders.',
+      'Keep WhatsApp replies clean: no markdown headings, prefer short paragraphs or bullet lists.',
+      'If part of your output is internal reasoning, wrap it in <internal> tags.',
+      'Legacy references to mcp__bioclaw__send_message or mcp__bioclaw__send_image map to send_message and send_image in this runtime.',
+      'Your writable workspace is primarily /workspace/group. The main group can also modify /workspace/project.',
+    ].join('\n'),
+    ...loadPromptFragments(containerInput),
+  ];
+
+  return fragments.join('\n\n');
+}
+
+async function callChatCompletion(
+  providerConfig: ProviderConfig,
+  messages: ChatMessage[],
+): Promise<{ content: string; toolCalls: ToolCall[] }> {
+  const payload: Record<string, unknown> = {
+    model: providerConfig.model,
+    messages,
+    tools: TOOL_DEFINITIONS,
+    tool_choice: 'auto',
+    max_tokens: providerConfig.maxTokens,
+    temperature: providerConfig.temperature,
+  };
+
+  if (providerConfig.thinkingType) {
+    payload.thinking = { type: providerConfig.thinkingType };
+  }
+
+  const response = await fetch(providerConfig.apiUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${providerConfig.apiKey}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const raw = await response.text();
+  let parsed: ChatCompletionResponse;
+
+  try {
+    parsed = JSON.parse(raw) as ChatCompletionResponse;
+  } catch (err) {
+    throw new Error(`Provider returned invalid JSON: ${err instanceof Error ? err.message : String(err)}\n${truncate(raw, 1200)}`);
+  }
+
+  if (!response.ok) {
+    const message = parsed.error?.message || raw;
+    throw new Error(`Provider request failed (${response.status}): ${truncate(message, 1200)}`);
+  }
+
+  const message = parsed.choices?.[0]?.message;
+  if (!message) {
+    throw new Error(`Provider returned no choices: ${truncate(raw, 1200)}`);
+  }
+
+  return {
+    content: extractTextContent(message.content),
+    toolCalls: Array.isArray(message.tool_calls) ? message.tool_calls : [],
+  };
 }
 
 /**
@@ -311,7 +843,7 @@ function drainIpcInput(): string[] {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
         if (data.type === 'message' && data.text) {
-          messages.push(data.text);
+          messages.push(String(data.text));
         }
       } catch (err) {
         log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
@@ -347,161 +879,411 @@ function waitForIpcMessage(): Promise<string | null> {
   });
 }
 
-/**
- * Run a single query and stream results via writeOutput.
- * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
- * allowing agent teams subagents to run to completion.
- * Also pipes IPC messages into the stream during the query.
- */
+function formatToolResult(result: unknown): string {
+  if (typeof result === 'string') {
+    return result;
+  }
+  return JSON.stringify(result, null, 2);
+}
+
+const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
+  async bash(args) {
+    const command = ensureString(args.command, 'command');
+    const timeoutSec = ensureInteger(args.timeout_sec, 'timeout_sec', 120, 1, 600);
+    const env = { ...process.env };
+    for (const key of TOOL_ENV_VARS) {
+      delete env[key];
+    }
+
+    try {
+      const { stdout, stderr } = await exec(command, {
+        cwd: '/workspace/group',
+        shell: '/bin/bash',
+        timeout: timeoutSec * 1000,
+        maxBuffer: 4 * 1024 * 1024,
+        env,
+      });
+
+      return truncate(
+        `exit_code: 0\nstdout:\n${stdout || '(empty)'}\nstderr:\n${stderr || '(empty)'}`,
+        MAX_TOOL_OUTPUT_CHARS,
+      );
+    } catch (err) {
+      const error = err as {
+        code?: number | string;
+        stdout?: string;
+        stderr?: string;
+        message?: string;
+      };
+      return truncate(
+        `exit_code: ${error.code ?? 'unknown'}\nstdout:\n${error.stdout || '(empty)'}\nstderr:\n${error.stderr || error.message || '(empty)'}`,
+        MAX_TOOL_OUTPUT_CHARS,
+      );
+    }
+  },
+
+  async read_file(args, context) {
+    const filePath = ensureAllowedPath(ensureString(args.file_path, 'file_path'), context.readableRoots);
+    const content = loadTextFile(filePath);
+    const startLine = args.start_line === undefined ? 1 : ensureInteger(args.start_line, 'start_line', 1, 1, 1_000_000);
+    const endLine = args.end_line === undefined ? undefined : ensureInteger(args.end_line, 'end_line', startLine, startLine, 1_000_000);
+    const lines = content.split('\n');
+    const selected = lines.slice(startLine - 1, endLine ?? lines.length);
+    const numbered = selected.map((line, index) => `${startLine + index}: ${line}`).join('\n');
+    return truncate(numbered, MAX_FILE_READ_CHARS);
+  },
+
+  async write_file(args, context) {
+    const filePath = ensureAllowedPath(ensureString(args.file_path, 'file_path'), context.writableRoots);
+    const content = ensureString(args.content, 'content');
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, content, 'utf-8');
+    return `Wrote ${content.length} chars to ${filePath}`;
+  },
+
+  async edit_file(args, context) {
+    const filePath = ensureAllowedPath(ensureString(args.file_path, 'file_path'), context.writableRoots);
+    const oldText = ensureString(args.old_text, 'old_text');
+    const newText = typeof args.new_text === 'string' ? args.new_text : String(args.new_text ?? '');
+    const replaceAll = ensureBoolean(args.replace_all);
+    const original = loadTextFile(filePath);
+
+    const occurrences = original.split(oldText).length - 1;
+    if (occurrences === 0) {
+      throw new Error(`old_text not found in ${filePath}`);
+    }
+    if (!replaceAll && occurrences !== 1) {
+      throw new Error(`old_text matched ${occurrences} times; set replace_all=true to replace every match`);
+    }
+
+    const updated = replaceAll
+      ? original.split(oldText).join(newText)
+      : original.replace(oldText, newText);
+    fs.writeFileSync(filePath, updated, 'utf-8');
+    return `Updated ${filePath}; replaced ${replaceAll ? occurrences : 1} occurrence(s).`;
+  },
+
+  async list_files(args, context) {
+    const dirPath = args.dir_path
+      ? ensureAllowedPath(ensureString(args.dir_path, 'dir_path'), context.readableRoots)
+      : '/workspace/group';
+    const recursive = ensureBoolean(args.recursive);
+    const pattern = typeof args.pattern === 'string' ? args.pattern : undefined;
+    const paths = collectPaths(dirPath, recursive)
+      .filter(currentPath => matchesPattern(path.basename(currentPath), pattern))
+      .map(currentPath => {
+        const stat = fs.statSync(currentPath);
+        const suffix = stat.isDirectory() ? '/' : '';
+        return `${currentPath}${suffix}`;
+      });
+
+    return truncate(paths.join('\n') || '(no matches)', MAX_TOOL_OUTPUT_CHARS);
+  },
+
+  async grep_files(args, context) {
+    const pattern = ensureString(args.pattern, 'pattern');
+    const dirPath = args.dir_path
+      ? ensureAllowedPath(ensureString(args.dir_path, 'dir_path'), context.readableRoots)
+      : '/workspace/group';
+    const filePattern = typeof args.file_pattern === 'string' ? args.file_pattern : undefined;
+    const caseInsensitive = ensureBoolean(args.case_insensitive);
+    const regex = new RegExp(pattern, caseInsensitive ? 'i' : '');
+    const matches: string[] = [];
+
+    for (const currentPath of collectPaths(dirPath, true, 500)) {
+      const stat = fs.statSync(currentPath);
+      if (stat.isDirectory()) {
+        continue;
+      }
+      if (!matchesPattern(path.basename(currentPath), filePattern)) {
+        continue;
+      }
+      if (stat.size > 1_000_000) {
+        continue;
+      }
+
+      try {
+        const content = loadTextFile(currentPath);
+        const lines = content.split('\n');
+        for (let index = 0; index < lines.length; index++) {
+          if (regex.test(lines[index])) {
+            matches.push(`${currentPath}:${index + 1}: ${lines[index]}`);
+            if (matches.length >= 200) {
+              return truncate(matches.join('\n'), MAX_TOOL_OUTPUT_CHARS);
+            }
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return truncate(matches.join('\n') || '(no matches)', MAX_TOOL_OUTPUT_CHARS);
+  },
+
+  async send_message(args, context) {
+    const text = ensureString(args.text, 'text');
+    const sender = typeof args.sender === 'string' ? args.sender : undefined;
+    const payload: Record<string, string | undefined> = {
+      type: 'message',
+      chatJid: context.containerInput.chatJid,
+      text,
+      sender,
+      groupFolder: context.containerInput.groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, payload);
+    return 'Message sent.';
+  },
+
+  async send_image(args, context) {
+    const srcPath = ensureAllowedPath(ensureString(args.file_path, 'file_path'), context.readableRoots);
+    if (!fs.existsSync(srcPath)) {
+      throw new Error(`File not found: ${srcPath}`);
+    }
+
+    fs.mkdirSync(FILES_DIR, { recursive: true });
+    const ext = path.extname(srcPath) || '.png';
+    const destFilename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+    const destPath = path.join(FILES_DIR, destFilename);
+    fs.copyFileSync(srcPath, destPath);
+
+    writeIpcFile(MESSAGES_DIR, {
+      type: 'image',
+      chatJid: context.containerInput.chatJid,
+      filePath: `files/${destFilename}`,
+      caption: typeof args.caption === 'string' ? args.caption : undefined,
+      groupFolder: context.containerInput.groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    return `Image queued for sending: ${destFilename}`;
+  },
+
+  async schedule_task(args, context) {
+    const prompt = ensureString(args.prompt, 'prompt');
+    const scheduleType = ensureString(args.schedule_type, 'schedule_type');
+    const scheduleValue = ensureString(args.schedule_value, 'schedule_value');
+    const contextMode = typeof args.context_mode === 'string' ? args.context_mode : 'group';
+
+    if (!['cron', 'interval', 'once'].includes(scheduleType)) {
+      throw new Error('schedule_type must be cron, interval, or once');
+    }
+
+    if (!['group', 'isolated'].includes(contextMode)) {
+      throw new Error('context_mode must be group or isolated');
+    }
+
+    if (scheduleType === 'cron') {
+      CronExpressionParser.parse(scheduleValue);
+    } else if (scheduleType === 'interval') {
+      const ms = parseInt(scheduleValue, 10);
+      if (Number.isNaN(ms) || ms <= 0) {
+        throw new Error('interval schedule_value must be positive milliseconds');
+      }
+    } else {
+      const date = new Date(scheduleValue);
+      if (Number.isNaN(date.getTime())) {
+        throw new Error('once schedule_value must be an ISO timestamp');
+      }
+    }
+
+    const targetJid = context.containerInput.isMain && typeof args.target_group_jid === 'string'
+      ? args.target_group_jid
+      : context.containerInput.chatJid;
+
+    const filename = writeIpcFile(TASKS_DIR, {
+      type: 'schedule_task',
+      prompt,
+      schedule_type: scheduleType,
+      schedule_value: scheduleValue,
+      context_mode: contextMode,
+      targetJid,
+      createdBy: context.containerInput.groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    return `Task scheduled (${filename}): ${scheduleType} - ${scheduleValue}`;
+  },
+
+  async list_tasks(_args, context) {
+    const tasksFile = path.join(IPC_DIR, 'current_tasks.json');
+    if (!fs.existsSync(tasksFile)) {
+      return 'No scheduled tasks found.';
+    }
+
+    const allTasks = JSON.parse(fs.readFileSync(tasksFile, 'utf-8')) as Array<{
+      id: string;
+      groupFolder: string;
+      prompt: string;
+      schedule_type: string;
+      schedule_value: string;
+      status: string;
+      next_run: string;
+    }>;
+
+    const visibleTasks = context.containerInput.isMain
+      ? allTasks
+      : allTasks.filter(task => task.groupFolder === context.containerInput.groupFolder);
+
+    if (visibleTasks.length === 0) {
+      return 'No scheduled tasks found.';
+    }
+
+    return visibleTasks
+      .map(task =>
+        `- [${task.id}] ${task.prompt.slice(0, 50)}... (${task.schedule_type}: ${task.schedule_value}) - ${task.status}, next: ${task.next_run || 'N/A'}`,
+      )
+      .join('\n');
+  },
+
+  async pause_task(args, context) {
+    const taskId = ensureString(args.task_id, 'task_id');
+    writeIpcFile(TASKS_DIR, {
+      type: 'pause_task',
+      taskId,
+      groupFolder: context.containerInput.groupFolder,
+      isMain: context.containerInput.isMain,
+      timestamp: new Date().toISOString(),
+    });
+    return `Task ${taskId} pause requested.`;
+  },
+
+  async resume_task(args, context) {
+    const taskId = ensureString(args.task_id, 'task_id');
+    writeIpcFile(TASKS_DIR, {
+      type: 'resume_task',
+      taskId,
+      groupFolder: context.containerInput.groupFolder,
+      isMain: context.containerInput.isMain,
+      timestamp: new Date().toISOString(),
+    });
+    return `Task ${taskId} resume requested.`;
+  },
+
+  async cancel_task(args, context) {
+    const taskId = ensureString(args.task_id, 'task_id');
+    writeIpcFile(TASKS_DIR, {
+      type: 'cancel_task',
+      taskId,
+      groupFolder: context.containerInput.groupFolder,
+      isMain: context.containerInput.isMain,
+      timestamp: new Date().toISOString(),
+    });
+    return `Task ${taskId} cancellation requested.`;
+  },
+
+  async register_group(args, context) {
+    if (!context.containerInput.isMain) {
+      throw new Error('Only the main group can register new groups.');
+    }
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'register_group',
+      jid: ensureString(args.jid, 'jid'),
+      name: ensureString(args.name, 'name'),
+      folder: ensureString(args.folder, 'folder'),
+      trigger: ensureString(args.trigger, 'trigger'),
+      timestamp: new Date().toISOString(),
+    });
+
+    return `Group "${ensureString(args.name, 'name')}" registered. It will start receiving messages immediately.`;
+  },
+};
+
+async function executeToolCall(toolCall: ToolCall, context: ToolContext): Promise<string> {
+  const executor = TOOL_EXECUTORS[toolCall.function.name];
+  if (!executor) {
+    return JSON.stringify({ ok: false, error: `Unknown tool: ${toolCall.function.name}` });
+  }
+
+  let args: Record<string, unknown> = {};
+  try {
+    args = toolCall.function.arguments
+      ? JSON.parse(toolCall.function.arguments) as Record<string, unknown>
+      : {};
+  } catch (err) {
+    return JSON.stringify({
+      ok: false,
+      error: `Failed to parse tool arguments: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+
+  try {
+    const result = await executor(args, context);
+    return truncate(JSON.stringify({ ok: true, result: formatToolResult(result) }, null, 2), MAX_TOOL_OUTPUT_CHARS);
+  } catch (err) {
+    return truncate(JSON.stringify({
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    }, null, 2), MAX_TOOL_OUTPUT_CHARS);
+  }
+}
+
 async function runQuery(
   prompt: string,
   sessionId: string | undefined,
-  mcpServerPath: string,
   containerInput: ContainerInput,
-  sdkEnv: Record<string, string | undefined>,
-  resumeAt?: string,
-): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
-  const stream = new MessageStream();
-  stream.push(prompt);
-
-  // Poll IPC for follow-up messages and _close sentinel during the query
-  let ipcPolling = true;
-  let closedDuringQuery = false;
-  const pollIpcDuringQuery = () => {
-    if (!ipcPolling) return;
-    if (shouldClose()) {
-      log('Close sentinel detected during query, ending stream');
-      closedDuringQuery = true;
-      stream.end();
-      ipcPolling = false;
-      return;
-    }
-    const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
-    }
-    setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
+  providerConfig: ProviderConfig,
+): Promise<{ newSessionId: string; closedDuringQuery: boolean; result: string | null }> {
+  const session = sessionId ? loadSession(sessionId) || createSession() : createSession();
+  const toolContext = createToolContext(containerInput);
+  const systemPrompt: ChatMessage = {
+    role: 'system',
+    content: buildSystemPrompt(containerInput),
   };
-  setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
 
-  let newSessionId: string | undefined;
-  let lastAssistantUuid: string | undefined;
-  let messageCount = 0;
-  let resultCount = 0;
+  session.messages.push({ role: 'user', content: prompt });
 
-  // BioClaw: inject biology-specific system context
-  const bioSystemPrompt = [
-    '## BioClaw — Biology Research Assistant',
-    '',
-    'You are Bio, an AI biology research assistant running inside an isolated container.',
-    'You have full access to bioinformatics tools: BLAST+, SAMtools, BEDTools, BWA, minimap2, FastQC, seqtk.',
-    'Python libraries: BioPython, pandas, NumPy, SciPy, matplotlib, seaborn, scikit-learn, RDKit, PyDESeq2, scanpy, pysam.',
-    '',
-    'When users ask biology questions, prefer running actual analysis over giving theoretical answers.',
-    'Write and execute Python scripts or bash commands to produce real results.',
-    'Save output files to /workspace/group/ so users can access them.',
-    'When you generate an image file (such as PNG, JPG, or GIF), call mcp__bioclaw__send_image to send it to the user instead of only mentioning the saved file path in text.',
-    "If you generate plots with Chinese labels via matplotlib, configure a Chinese-capable font first (try: 'Noto Sans CJK SC' or 'WenQuanYi Zen Hei') and set axes.unicode_minus=False to avoid missing glyphs and minus-sign issues.",
-    '',
-  ].join('\n');
-
-  // Load global CLAUDE.md as additional system context (shared across all groups)
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
-  let globalClaudeMd: string | undefined;
-  const globalContent = fs.existsSync(globalClaudeMdPath)
-    ? fs.readFileSync(globalClaudeMdPath, 'utf-8')
-    : '';
-  globalClaudeMd = bioSystemPrompt + globalContent;
-
-  // Discover additional directories mounted at /workspace/extra/*
-  // These are passed to the SDK so their CLAUDE.md files are loaded automatically
-  const extraDirs: string[] = [];
-  const extraBase = '/workspace/extra';
-  if (fs.existsSync(extraBase)) {
-    for (const entry of fs.readdirSync(extraBase)) {
-      const fullPath = path.join(extraBase, entry);
-      if (fs.statSync(fullPath).isDirectory()) {
-        extraDirs.push(fullPath);
-      }
-    }
-  }
-  if (extraDirs.length > 0) {
-    log(`Additional directories: ${extraDirs.join(', ')}`);
-  }
-
-  for await (const message of query({
-    prompt: stream,
-    options: {
-      cwd: '/workspace/group',
-      additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
-      resume: sessionId,
-      resumeSessionAt: resumeAt,
-      systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd || '' },
-      allowedTools: [
-        'Bash',
-        'Read', 'Write', 'Edit', 'Glob', 'Grep',
-        'WebSearch', 'WebFetch',
-        'Task', 'TaskOutput', 'TaskStop',
-        'TeamCreate', 'TeamDelete', 'SendMessage',
-        'TodoWrite', 'ToolSearch', 'Skill',
-        'NotebookEdit',
-        'mcp__bioclaw__*'
-      ],
-      env: sdkEnv,
-      permissionMode: 'bypassPermissions',
-      allowDangerouslySkipPermissions: true,
-      settingSources: ['project', 'user'],
-      mcpServers: {
-        bioclaw: {
-          command: 'node',
-          args: [mcpServerPath],
-          env: {
-            BIOCLAW_CHAT_JID: containerInput.chatJid,
-            BIOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            BIOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
-          },
-        },
-      },
-      hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook()] }],
-        PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
-      },
-    }
-  })) {
-    messageCount++;
-    const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
-    log(`[msg #${messageCount}] type=${msgType}`);
-
-    if (message.type === 'assistant' && 'uuid' in message) {
-      lastAssistantUuid = (message as { uuid: string }).uuid;
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    if (shouldClose()) {
+      saveSession(session);
+      writeConversationArchive(session);
+      return {
+        newSessionId: session.sessionId,
+        closedDuringQuery: true,
+        result: null,
+      };
     }
 
-    if (message.type === 'system' && message.subtype === 'init') {
-      newSessionId = message.session_id;
-      log(`Session initialized: ${newSessionId}`);
+    log(`Calling provider model ${providerConfig.model} (round ${round + 1})`);
+    const response = await callChatCompletion(
+      providerConfig,
+      [systemPrompt, ...trimMessages(session.messages)],
+    );
+
+    session.messages.push({
+      role: 'assistant',
+      content: response.content || null,
+      tool_calls: response.toolCalls.length > 0 ? response.toolCalls : undefined,
+    });
+
+    if (response.toolCalls.length === 0) {
+      saveSession(session);
+      writeConversationArchive(session);
+      return {
+        newSessionId: session.sessionId,
+        closedDuringQuery: false,
+        result: response.content.trim() || null,
+      };
     }
 
-    if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
-      const tn = message as { task_id: string; status: string; summary: string };
-      log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
-    }
-
-    if (message.type === 'result') {
-      resultCount++;
-      const textResult = 'result' in message ? (message as { result?: string }).result : null;
-      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
-      writeOutput({
-        status: 'success',
-        result: textResult || null,
-        newSessionId
+    for (const toolCall of response.toolCalls) {
+      log(`Executing tool ${toolCall.function.name}`);
+      const toolResult = await executeToolCall(toolCall, toolContext);
+      session.messages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        name: toolCall.function.name,
+        content: toolResult,
       });
     }
   }
 
-  ipcPolling = false;
-  log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`);
-  return { newSessionId, lastAssistantUuid, closedDuringQuery };
+  saveSession(session);
+  writeConversationArchive(session);
+  throw new Error(`Model exceeded tool limit (${MAX_TOOL_ROUNDS} rounds)`);
 }
 
 async function main(): Promise<void> {
@@ -509,81 +1291,67 @@ async function main(): Promise<void> {
 
   try {
     const stdinData = await readStdin();
-    containerInput = JSON.parse(stdinData);
-    // Delete the temp file the entrypoint wrote — it contains secrets
-    try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
+    containerInput = JSON.parse(stdinData) as ContainerInput;
+    try { fs.unlinkSync('/tmp/input.json'); } catch { /* ignore */ }
     log(`Received input for group: ${containerInput.groupFolder}`);
   } catch (err) {
     writeOutput({
       status: 'error',
       result: null,
-      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`
+      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`,
     });
     process.exit(1);
+    return;
   }
 
-  // Build SDK env: merge secrets into process.env for the SDK only.
-  // Secrets never touch process.env itself, so Bash subprocesses can't see them.
-  const sdkEnv: Record<string, string | undefined> = { ...process.env };
-  for (const [key, value] of Object.entries(containerInput.secrets || {})) {
-    sdkEnv[key] = value;
-  }
-
-  const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
-
-  let sessionId = containerInput.sessionId;
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
-
-  // Clean up stale _close sentinel from previous container runs
   try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
 
-  // Build initial prompt (drain any pending IPC messages too)
   let prompt = containerInput.prompt;
   if (containerInput.isScheduledTask) {
     prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
   }
   const pending = drainIpcInput();
   if (pending.length > 0) {
-    log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.join('\n');
+    prompt += `\n${pending.join('\n')}`;
   }
 
-  // Query loop: run query → wait for IPC message → run new query → repeat
-  let resumeAt: string | undefined;
+  let latestSessionId = containerInput.sessionId;
+
   try {
+    const providerConfig = loadProviderConfig(containerInput);
+    let sessionId = containerInput.sessionId;
+
     while (true) {
-      log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
+      const queryResult = await runQuery(prompt, sessionId, containerInput, providerConfig);
+      sessionId = queryResult.newSessionId;
+      latestSessionId = sessionId;
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
-      if (queryResult.newSessionId) {
-        sessionId = queryResult.newSessionId;
-      }
-      if (queryResult.lastAssistantUuid) {
-        resumeAt = queryResult.lastAssistantUuid;
+      if (queryResult.result !== null) {
+        writeOutput({
+          status: 'success',
+          result: queryResult.result,
+          newSessionId: sessionId,
+        });
       }
 
-      // If _close was consumed during the query, exit immediately.
-      // Don't emit a session-update marker (it would reset the host's
-      // idle timer and cause a 30-min delay before the next _close).
       if (queryResult.closedDuringQuery) {
-        log('Close sentinel consumed during query, exiting');
+        log('Close sentinel received during active query, exiting');
         break;
       }
 
-      // Emit session update so host can track it
-      writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+      writeOutput({
+        status: 'success',
+        result: null,
+        newSessionId: sessionId,
+      });
 
-      log('Query ended, waiting for next IPC message...');
-
-      // Wait for the next message or _close sentinel
       const nextMessage = await waitForIpcMessage();
       if (nextMessage === null) {
-        log('Close sentinel received, exiting');
+        log('Close sentinel received while idle, exiting');
         break;
       }
 
-      log(`Got new message (${nextMessage.length} chars), starting new query`);
       prompt = nextMessage;
     }
   } catch (err) {
@@ -592,8 +1360,8 @@ async function main(): Promise<void> {
     writeOutput({
       status: 'error',
       result: null,
-      newSessionId: sessionId,
-      error: errorMessage
+      newSessionId: latestSessionId,
+      error: errorMessage,
     });
     process.exit(1);
   }

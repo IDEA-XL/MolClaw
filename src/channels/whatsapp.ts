@@ -18,6 +18,13 @@ import {
   updateChatName,
 } from '../db.js';
 import { logger } from '../logger.js';
+import {
+  configureGlobalFetchProxy,
+  createFetchProxyDispatcher,
+  createSocketProxyAgent,
+  getConfiguredProxyUrl,
+  maskProxyUrl,
+} from '../proxy.js';
 import { Channel, OnInboundMessage, OnChatMetadata, RegisteredGroup } from '../types.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -57,6 +64,11 @@ export class WhatsAppChannel implements Channel {
 
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
+    const proxyUrl = getConfiguredProxyUrl();
+    configureGlobalFetchProxy();
+    const proxyAgent = createSocketProxyAgent();
+    const fetchDispatcher = createFetchProxyDispatcher();
+
     let version: [number, number, number] | undefined;
     try {
       const versionInfo = await fetchLatestBaileysVersion();
@@ -64,6 +76,13 @@ export class WhatsAppChannel implements Channel {
       logger.info({ version: version.join('.') }, 'Using WhatsApp version');
     } catch (err) {
       logger.warn({ err }, 'Failed to fetch latest WhatsApp version, using default');
+    }
+
+    if (proxyUrl) {
+      logger.info(
+        { proxy: maskProxyUrl(proxyUrl) },
+        'Using proxy for WhatsApp connection',
+      );
     }
 
     this.sock = makeWASocket({
@@ -75,7 +94,10 @@ export class WhatsAppChannel implements Channel {
       printQRInTerminal: false,
       logger,
       browser: Browsers.macOS('Chrome'),
-    });
+      connectTimeoutMs: 60_000,
+      ...(proxyAgent ? { agent: proxyAgent } : {}),
+      ...(fetchDispatcher ? { fetchAgent: fetchDispatcher as any } : {}),
+    } as any);
 
     this.sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect, qr } = update;
@@ -98,10 +120,12 @@ export class WhatsAppChannel implements Channel {
 
         if (shouldReconnect) {
           logger.info('Reconnecting...');
-          this.connectInternal().catch((err) => {
+          // Preserve the initial connect callback across early reconnects so
+          // startup can finish even if the first handshake fails.
+          this.connectInternal(onFirstOpen).catch((err) => {
             logger.error({ err }, 'Failed to reconnect, retrying in 5s');
             setTimeout(() => {
-              this.connectInternal().catch((err2) => {
+              this.connectInternal(onFirstOpen).catch((err2) => {
                 logger.error({ err: err2 }, 'Reconnection retry failed');
               });
             }, 5000);

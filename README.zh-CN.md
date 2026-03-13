@@ -15,7 +15,7 @@ BioClaw 将常见生物信息学任务带到聊天界面中。你可以通过自
 - macOS 或 Linux
 - Node.js 20+
 - Docker Desktop
-- Anthropic API Key
+- OpenAI 兼容 API 的 base URL / API Key / model
 
 ### 安装
 
@@ -24,6 +24,10 @@ git clone https://github.com/Runchuan-BU/BioClaw.git
 cd BioClaw
 npm install
 cp .env.example .env
+# 编辑 .env，填入你的 OpenAI 兼容模型网关配置，例如：
+# OPENAI_COMPAT_BASE_URL=https://openapi.dp.tech/openapi/v1
+# OPENAI_COMPAT_API_KEY=your-key
+# OPENAI_COMPAT_MODEL=openapi/claude-4.5-sonnet
 npm start
 ```
 
@@ -60,4 +64,3 @@ install https://github.com/Runchuan-BU/BioClaw
 完整示例任务与截图见：
 
 - [ExampleTask/ExampleTask.md](ExampleTask/ExampleTask.md)
-

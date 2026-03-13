@@ -1,4 +1,5 @@
 import { execSync } from 'child_process';
+import dns from 'node:dns';
 import fs from 'fs';
 import path from 'path';
 
@@ -38,6 +39,8 @@ import { formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+
+dns.setDefaultResultOrder('ipv4first');
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';

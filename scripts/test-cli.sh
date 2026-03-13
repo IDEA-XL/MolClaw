@@ -15,10 +15,12 @@ CLAUDE_DIR="/tmp/bioclaw-test/.claude"
 rm -rf "$IPC_DIR" "$CLAUDE_DIR"
 mkdir -p "$IPC_DIR/messages" "$IPC_DIR/tasks" "$IPC_DIR/input" "$CLAUDE_DIR"
 
-# Read API key from .env
-API_KEY=$(grep '^ANTHROPIC_API_KEY=' "$PROJ/.env" 2>/dev/null | cut -d= -f2- | tr -d "'" | tr -d '"')
-if [ -z "$API_KEY" ]; then
-    echo "Error: ANTHROPIC_API_KEY not found in $PROJ/.env"
+# Read provider config from .env
+BASE_URL=$(grep '^OPENAI_COMPAT_BASE_URL=' "$PROJ/.env" 2>/dev/null | cut -d= -f2- | tr -d "'" | tr -d '"')
+API_KEY=$(grep '^OPENAI_COMPAT_API_KEY=' "$PROJ/.env" 2>/dev/null | cut -d= -f2- | tr -d "'" | tr -d '"')
+MODEL=$(grep '^OPENAI_COMPAT_MODEL=' "$PROJ/.env" 2>/dev/null | cut -d= -f2- | tr -d "'" | tr -d '"')
+if [ -z "$BASE_URL" ] || [ -z "$API_KEY" ] || [ -z "$MODEL" ]; then
+    echo "Error: OPENAI_COMPAT_BASE_URL / OPENAI_COMPAT_API_KEY / OPENAI_COMPAT_MODEL not found in $PROJ/.env"
     exit 1
 fi
 
@@ -30,9 +32,13 @@ print(json.dumps({
     'groupFolder': 'cli-test',
     'chatJid': 'cli@test',
     'isMain': False,
-    'secrets': {'ANTHROPIC_API_KEY': sys.argv[2]}
+    'secrets': {
+        'OPENAI_COMPAT_BASE_URL': sys.argv[2],
+        'OPENAI_COMPAT_API_KEY': sys.argv[3],
+        'OPENAI_COMPAT_MODEL': sys.argv[4]
+    }
 }))
-" "$PROMPT" "$API_KEY")
+" "$PROMPT" "$BASE_URL" "$API_KEY" "$MODEL")
 
 echo ""
 echo "========================================"
@@ -40,6 +46,7 @@ echo "  BioClaw - Local Test"
 echo "========================================"
 echo ""
 echo "Prompt: $PROMPT"
+echo "Model: $MODEL"
 echo ""
 echo "Starting container... (this takes ~20-60 seconds)"
 echo ""

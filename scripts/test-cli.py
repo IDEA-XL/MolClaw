@@ -37,15 +37,15 @@ DEFAULT_PROMPT = (
 )
 
 
-def load_api_key() -> str:
+def load_env_value(name: str) -> str:
     env_file = PROJ / ".env"
     if not env_file.exists():
         sys.exit("Error: .env not found")
     for line in env_file.read_text().splitlines():
         line = line.strip()
-        if line.startswith("ANTHROPIC_API_KEY="):
+        if line.startswith(f"{name}="):
             return line.split("=", 1)[1].strip().strip("'\"")
-    sys.exit("Error: ANTHROPIC_API_KEY not found in .env")
+    sys.exit(f"Error: {name} not found in .env")
 
 
 def setup_dirs():
@@ -62,7 +62,9 @@ def send_close():
 
 def main():
     prompt = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_PROMPT
-    api_key = load_api_key()
+    api_key = load_env_value("OPENAI_COMPAT_API_KEY")
+    base_url = load_env_value("OPENAI_COMPAT_BASE_URL")
+    model = load_env_value("OPENAI_COMPAT_MODEL")
     setup_dirs()
 
     input_json = json.dumps({
@@ -70,7 +72,11 @@ def main():
         "groupFolder": "cli-test",
         "chatJid": "cli@test",
         "isMain": False,
-        "secrets": {"ANTHROPIC_API_KEY": api_key},
+        "secrets": {
+            "OPENAI_COMPAT_API_KEY": api_key,
+            "OPENAI_COMPAT_BASE_URL": base_url,
+            "OPENAI_COMPAT_MODEL": model,
+        },
     })
 
     pprint()
@@ -80,7 +86,8 @@ def main():
     pprint()
     pprint(f"Prompt: {prompt[:120]}{'...' if len(prompt) > 120 else ''}")
     pprint()
-    pprint("Starting container (takes ~20-60s for Claude to respond)...")
+    pprint(f"Model: {model}")
+    pprint("Starting container (takes ~20-60s for the model to respond)...")
     pprint()
 
     group_dir = PROJ / "groups" / "cli-test"

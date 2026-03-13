@@ -3,8 +3,15 @@
 
 FROM node:22-slim
 
+# Use faster, more reliable mirrors in this network environment.
+RUN sed -i \
+    -e 's|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/debian|g' \
+    -e 's|http://deb.debian.org/debian-security|http://mirrors.tuna.tsinghua.edu.cn/debian-security|g' \
+    /etc/apt/sources.list.d/debian.sources
+RUN printf 'Acquire::Retries "10";\nAcquire::http::Pipeline-Depth "0";\nAcquire::http::No-Cache "true";\nAcquire::BrokenProxy "true";\n' > /etc/apt/apt.conf.d/99bioclaw-network
+
 # Install system dependencies for Chromium + bio tools
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install --fix-missing -y \
     # --- Browser automation ---
     chromium \
     fonts-liberation \
@@ -53,6 +60,7 @@ RUN apt-get update && apt-get install -y \
 
 # Install Python biology libraries
 RUN pip3 install --no-cache-dir --break-system-packages \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
     biopython \
     pandas \
     numpy \
@@ -69,13 +77,14 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     multiqc
 
 # Install PyMOL (headless) via apt
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install --fix-missing -y \
     pymol \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
+ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
 
 # Install agent-browser and claude-code globally
 RUN npm install -g agent-browser @anthropic-ai/claude-code
