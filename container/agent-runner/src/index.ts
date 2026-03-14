@@ -26,10 +26,27 @@ interface ContainerInput {
 }
 
 interface ContainerOutput {
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'progress';
   result: string | null;
   newSessionId?: string;
   error?: string;
+  progress?: AgentProgressEvent;
+}
+
+interface AgentProgressEvent {
+  type: 'lifecycle' | 'provider' | 'tool';
+  stage: 'start' | 'end' | 'info' | 'error';
+  message?: string;
+  round?: number;
+  model?: string;
+  toolName?: string;
+  toolCallId?: string;
+  argsSummary?: string;
+  durationMs?: number;
+  success?: boolean;
+  contentChars?: number;
+  toolCalls?: number;
+  timestamp: string;
 }
 
 interface ToolCall {
@@ -99,6 +116,49 @@ interface ToolDefinition {
     parameters: JsonSchema;
   };
 }
+
+interface PubMedSearchResponse {
+  esearchresult?: {
+    count?: string;
+    idlist?: string[];
+  };
+}
+
+interface PubMedArticleId {
+  idtype?: string;
+  value?: string;
+}
+
+interface PubMedSummaryItem {
+  uid?: string;
+  title?: string;
+  pubdate?: string;
+  sortpubdate?: string;
+  fulljournalname?: string;
+  source?: string;
+  authors?: Array<{
+    name?: string;
+  }>;
+  articleids?: PubMedArticleId[];
+}
+
+interface PubMedSummaryResponse {
+  result?: {
+    uids?: string[];
+    [uid: string]: PubMedSummaryItem[] | PubMedSummaryItem | string[] | undefined;
+  };
+}
+
+const PROXY_ENV_KEYS = [
+  'HTTPS_PROXY',
+  'https_proxy',
+  'HTTP_PROXY',
+  'http_proxy',
+  'ALL_PROXY',
+  'all_proxy',
+  'NO_PROXY',
+  'no_proxy',
+] as const;
 
 const exec = promisify(execCallback);
 
@@ -240,6 +300,28 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'search_pubmed',
+      description:
+        'Search PubMed via NCBI E-utilities and return paper metadata (PMID/DOI/title/journal/year/authors).',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Search query, e.g. "CRBN multiple myeloma".',
+          },
+          max_results: {
+            type: 'integer',
+            description: 'Number of results to return (1-20, default 5).',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'send_message',
       description:
         "Send a message to the user or group immediately while you're still working.",
@@ -371,6 +453,11 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
 
 type ToolExecutor = (args: Record<string, unknown>, context: ToolContext) => Promise<unknown>;
 
+interface ToolExecutionResult {
+  output: string;
+  success: boolean;
+}
+
 async function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -391,11 +478,31 @@ function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
 
+function writeProgress(progress: Omit<AgentProgressEvent, 'timestamp'>, newSessionId?: string): void {
+  writeOutput({
+    status: 'progress',
+    result: null,
+    newSessionId,
+    progress: {
+      ...progress,
+      timestamp: new Date().toISOString(),
+    },
+  });
+}
+
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) {
     return text;
   }
   return `${text.slice(0, maxChars)}\n...[truncated ${text.length - maxChars} chars]`;
+}
+
+function summarizeToolArgs(rawArgs: string, maxChars = 260): string {
+  const compact = rawArgs.replace(/\s+/g, ' ').trim();
+  if (compact.length <= maxChars) {
+    return compact;
+  }
+  return `${compact.slice(0, maxChars)}...[truncated ${compact.length - maxChars} chars]`;
 }
 
 function ensureString(value: unknown, fieldName: string): string {
@@ -458,6 +565,15 @@ function parseNumberConfig(value: string | undefined, fallback: number): number 
     return fallback;
   }
   return parsed;
+}
+
+function applyRuntimeEnv(containerInput: ContainerInput): void {
+  for (const key of PROXY_ENV_KEYS) {
+    const val = containerInput.secrets?.[key];
+    if (typeof val === 'string' && val.trim()) {
+      process.env[key] = val.trim();
+    }
+  }
 }
 
 function loadProviderConfig(containerInput: ContainerInput): ProviderConfig {
@@ -548,6 +664,106 @@ function matchesPattern(name: string, pattern?: string): boolean {
     return true;
   }
   return wildcardToRegExp(pattern).test(name);
+}
+
+function formatPubMedResults(
+  query: string,
+  totalCount: string | undefined,
+  items: PubMedSummaryItem[],
+): string {
+  if (items.length === 0) {
+    return `No PubMed results found for query: ${query}`;
+  }
+
+  const lines: string[] = [];
+  lines.push(
+    `Found ${totalCount || 'unknown'} PubMed results for "${query}" (showing ${items.length}):`,
+    '',
+  );
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const pmid = (item.uid || '').trim();
+    const title = (item.title || 'Untitled').replace(/\s+/g, ' ').trim();
+    const journal = (item.fulljournalname || item.source || 'Unknown journal').trim();
+    const pubdate = (item.pubdate || item.sortpubdate || '').trim();
+    const year = (pubdate.match(/\b(19|20)\d{2}\b/) || [])[0] || 'n/a';
+    const authorNames = (item.authors || [])
+      .map((a) => (a.name || '').trim())
+      .filter(Boolean);
+    let authors = 'Unknown authors';
+    if (authorNames.length > 0) {
+      const head = authorNames.slice(0, 6).join(', ');
+      authors = authorNames.length > 6 ? `${head}, et al.` : head;
+    }
+
+    const doi = (item.articleids || [])
+      .find((id) => (id.idtype || '').toLowerCase() === 'doi')
+      ?.value?.trim();
+
+    lines.push(`${i + 1}. ${title}`);
+    lines.push(`   Authors: ${authors}`);
+    lines.push(`   Journal/Year: ${journal} (${year})`);
+    if (pmid) lines.push(`   PMID: ${pmid}`);
+    if (doi) lines.push(`   DOI: ${doi}`);
+    if (pmid) lines.push(`   URL: https://pubmed.ncbi.nlm.nih.gov/${pmid}/`);
+    lines.push('');
+  }
+
+  return lines.join('\n').trim();
+}
+
+async function fetchPubMedJson<T>(url: URL): Promise<T> {
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  });
+  const raw = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `PubMed request failed (${response.status}) for ${url.pathname}: ${truncate(raw, 800)}`,
+    );
+  }
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch (err) {
+    throw new Error(
+      `PubMed returned invalid JSON for ${url.pathname}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+async function searchPubMed(query: string, maxResults: number): Promise<string> {
+  const esearchUrl = new URL('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi');
+  esearchUrl.searchParams.set('db', 'pubmed');
+  esearchUrl.searchParams.set('term', query);
+  esearchUrl.searchParams.set('retmax', String(maxResults));
+  esearchUrl.searchParams.set('retmode', 'json');
+  esearchUrl.searchParams.set('sort', 'relevance');
+
+  const searchData = await fetchPubMedJson<PubMedSearchResponse>(esearchUrl);
+  const idList = searchData.esearchresult?.idlist || [];
+  if (idList.length === 0) {
+    return `No PubMed results found for query: ${query}`;
+  }
+
+  const esummaryUrl = new URL('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi');
+  esummaryUrl.searchParams.set('db', 'pubmed');
+  esummaryUrl.searchParams.set('id', idList.join(','));
+  esummaryUrl.searchParams.set('retmode', 'json');
+
+  const summaryData = await fetchPubMedJson<PubMedSummaryResponse>(esummaryUrl);
+  const uids = summaryData.result?.uids || idList;
+
+  const items: PubMedSummaryItem[] = uids
+    .map((uid) => summaryData.result?.[uid])
+    .filter((entry): entry is PubMedSummaryItem =>
+      !!entry && !Array.isArray(entry) && typeof entry === 'object',
+    );
+
+  return formatPubMedResults(query, searchData.esearchresult?.count, items);
 }
 
 function collectPaths(targetPath: string, recursive: boolean, maxEntries = 400): string[] {
@@ -749,6 +965,7 @@ function buildSystemPrompt(containerInput: ContainerInput): string {
       'You are Bio, an AI biology research assistant running inside an isolated container.',
       'Prefer doing real analysis with tools over giving purely theoretical answers.',
       'Use bash for BLAST, minimap2, BWA, FastQC, PyMOL, Python scripts, and network calls.',
+      'For biomedical literature retrieval, use search_pubmed first.',
       'Use read_file/write_file/edit_file/list_files/grep_files for direct workspace access.',
       'Use send_message for progress updates during long jobs.',
       'Use send_image after generating plots or structure renders.',
@@ -1025,6 +1242,12 @@ const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
     return truncate(matches.join('\n') || '(no matches)', MAX_TOOL_OUTPUT_CHARS);
   },
 
+  async search_pubmed(args) {
+    const query = ensureString(args.query, 'query');
+    const maxResults = ensureInteger(args.max_results, 'max_results', 5, 1, 20);
+    return searchPubMed(query, maxResults);
+  },
+
   async send_message(args, context) {
     const text = ensureString(args.text, 'text');
     const sender = typeof args.sender === 'string' ? args.sender : undefined;
@@ -1196,10 +1419,13 @@ const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
   },
 };
 
-async function executeToolCall(toolCall: ToolCall, context: ToolContext): Promise<string> {
+async function executeToolCall(toolCall: ToolCall, context: ToolContext): Promise<ToolExecutionResult> {
   const executor = TOOL_EXECUTORS[toolCall.function.name];
   if (!executor) {
-    return JSON.stringify({ ok: false, error: `Unknown tool: ${toolCall.function.name}` });
+    return {
+      success: false,
+      output: JSON.stringify({ ok: false, error: `Unknown tool: ${toolCall.function.name}` }),
+    };
   }
 
   let args: Record<string, unknown> = {};
@@ -1208,20 +1434,35 @@ async function executeToolCall(toolCall: ToolCall, context: ToolContext): Promis
       ? JSON.parse(toolCall.function.arguments) as Record<string, unknown>
       : {};
   } catch (err) {
-    return JSON.stringify({
-      ok: false,
-      error: `Failed to parse tool arguments: ${err instanceof Error ? err.message : String(err)}`,
-    });
+    return {
+      success: false,
+      output: JSON.stringify({
+        ok: false,
+        error: `Failed to parse tool arguments: ${err instanceof Error ? err.message : String(err)}`,
+      }),
+    };
   }
 
   try {
     const result = await executor(args, context);
-    return truncate(JSON.stringify({ ok: true, result: formatToolResult(result) }, null, 2), MAX_TOOL_OUTPUT_CHARS);
+    return {
+      success: true,
+      output: truncate(
+        JSON.stringify({ ok: true, result: formatToolResult(result) }, null, 2),
+        MAX_TOOL_OUTPUT_CHARS,
+      ),
+    };
   } catch (err) {
-    return truncate(JSON.stringify({
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-    }, null, 2), MAX_TOOL_OUTPUT_CHARS);
+    return {
+      success: false,
+      output: truncate(
+        JSON.stringify({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        }, null, 2),
+        MAX_TOOL_OUTPUT_CHARS,
+      ),
+    };
   }
 }
 
@@ -1239,9 +1480,26 @@ async function runQuery(
   };
 
   session.messages.push({ role: 'user', content: prompt });
+  writeProgress(
+    {
+      type: 'lifecycle',
+      stage: 'start',
+      message: 'query_started',
+    },
+    session.sessionId,
+  );
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const roundNumber = round + 1;
     if (shouldClose()) {
+      writeProgress(
+        {
+          type: 'lifecycle',
+          stage: 'info',
+          message: 'close_sentinel_during_query',
+        },
+        session.sessionId,
+      );
       saveSession(session);
       writeConversationArchive(session);
       return {
@@ -1251,11 +1509,42 @@ async function runQuery(
       };
     }
 
-    log(`Calling provider model ${providerConfig.model} (round ${round + 1})`);
-    const response = await callChatCompletion(
-      providerConfig,
-      [systemPrompt, ...trimMessages(session.messages)],
-    );
+    log(`Calling provider model ${providerConfig.model} (round ${roundNumber})`);
+    writeProgress({
+      type: 'provider',
+      stage: 'start',
+      round: roundNumber,
+      model: providerConfig.model,
+    }, session.sessionId);
+
+    const providerStartedAt = Date.now();
+    let response: { content: string; toolCalls: ToolCall[] };
+    try {
+      response = await callChatCompletion(
+        providerConfig,
+        [systemPrompt, ...trimMessages(session.messages)],
+      );
+    } catch (err) {
+      writeProgress({
+        type: 'provider',
+        stage: 'error',
+        round: roundNumber,
+        model: providerConfig.model,
+        durationMs: Date.now() - providerStartedAt,
+        message: err instanceof Error ? err.message : String(err),
+      }, session.sessionId);
+      throw err;
+    }
+    const providerDurationMs = Date.now() - providerStartedAt;
+    writeProgress({
+      type: 'provider',
+      stage: 'end',
+      round: roundNumber,
+      model: providerConfig.model,
+      durationMs: providerDurationMs,
+      toolCalls: response.toolCalls.length,
+      contentChars: response.content.trim().length,
+    }, session.sessionId);
 
     session.messages.push({
       role: 'assistant',
@@ -1264,6 +1553,12 @@ async function runQuery(
     });
 
     if (response.toolCalls.length === 0) {
+      writeProgress({
+        type: 'lifecycle',
+        stage: 'info',
+        message: 'final_response_ready',
+        contentChars: response.content.trim().length,
+      }, session.sessionId);
       saveSession(session);
       writeConversationArchive(session);
       return {
@@ -1275,12 +1570,33 @@ async function runQuery(
 
     for (const toolCall of response.toolCalls) {
       log(`Executing tool ${toolCall.function.name}`);
+      writeProgress({
+        type: 'tool',
+        stage: 'start',
+        round: roundNumber,
+        toolName: toolCall.function.name,
+        toolCallId: toolCall.id,
+        argsSummary: summarizeToolArgs(toolCall.function.arguments || '{}'),
+      }, session.sessionId);
+
+      const toolStartedAt = Date.now();
       const toolResult = await executeToolCall(toolCall, toolContext);
+      const toolDurationMs = Date.now() - toolStartedAt;
+      writeProgress({
+        type: 'tool',
+        stage: toolResult.success ? 'end' : 'error',
+        round: roundNumber,
+        toolName: toolCall.function.name,
+        toolCallId: toolCall.id,
+        durationMs: toolDurationMs,
+        success: toolResult.success,
+      }, session.sessionId);
+
       session.messages.push({
         role: 'tool',
         tool_call_id: toolCall.id,
         name: toolCall.function.name,
-        content: toolResult,
+        content: toolResult.output,
       });
     }
   }
@@ -1307,6 +1623,10 @@ async function main(): Promise<void> {
     process.exit(1);
     return;
   }
+
+  // Propagate proxy variables into runtime/tool process environment so
+  // `bash`/`curl`/Python requests can access external network when needed.
+  applyRuntimeEnv(containerInput);
 
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
   try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
@@ -1344,6 +1664,11 @@ async function main(): Promise<void> {
         break;
       }
 
+      writeProgress({
+        type: 'lifecycle',
+        stage: 'info',
+        message: 'waiting_for_follow_up_message',
+      }, sessionId);
       writeOutput({
         status: 'success',
         result: null,
@@ -1353,14 +1678,29 @@ async function main(): Promise<void> {
       const nextMessage = await waitForIpcMessage();
       if (nextMessage === null) {
         log('Close sentinel received while idle, exiting');
+        writeProgress({
+          type: 'lifecycle',
+          stage: 'info',
+          message: 'close_sentinel_while_idle',
+        }, sessionId);
         break;
       }
 
+      writeProgress({
+        type: 'lifecycle',
+        stage: 'info',
+        message: 'received_follow_up_message',
+      }, sessionId);
       prompt = nextMessage;
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     log(`Agent error: ${errorMessage}`);
+    writeProgress({
+      type: 'lifecycle',
+      stage: 'error',
+      message: errorMessage,
+    }, latestSessionId);
     writeOutput({
       status: 'error',
       result: null,

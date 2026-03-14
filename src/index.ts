@@ -21,6 +21,7 @@ import {
   maskProxyUrl,
 } from './proxy.js';
 import {
+  AgentProgressEvent,
   ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
@@ -62,6 +63,31 @@ let messageLoopRunning = false;
 let whatsapp: WhatsAppChannel | null = null;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+
+function summarizeProgress(progress?: AgentProgressEvent): string {
+  if (!progress) return 'unknown progress event';
+
+  if (progress.type === 'provider') {
+    const round = progress.round ? ` round=${progress.round}` : '';
+    const model = progress.model ? ` model=${progress.model}` : '';
+    const duration = progress.durationMs !== undefined ? ` durationMs=${progress.durationMs}` : '';
+    const toolCalls = progress.toolCalls !== undefined ? ` toolCalls=${progress.toolCalls}` : '';
+    const contentChars = progress.contentChars !== undefined ? ` contentChars=${progress.contentChars}` : '';
+    return `provider ${progress.stage}${round}${model}${duration}${toolCalls}${contentChars}`;
+  }
+
+  if (progress.type === 'tool') {
+    const round = progress.round ? ` round=${progress.round}` : '';
+    const tool = progress.toolName ? ` tool=${progress.toolName}` : '';
+    const duration = progress.durationMs !== undefined ? ` durationMs=${progress.durationMs}` : '';
+    const success = progress.success !== undefined ? ` success=${progress.success}` : '';
+    return `tool ${progress.stage}${round}${tool}${duration}${success}`;
+  }
+
+  return progress.message
+    ? `lifecycle ${progress.stage} message=${progress.message}`
+    : `lifecycle ${progress.stage}`;
+}
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -191,6 +217,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let outputSentToUser = false;
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
+    if (result.status === 'progress') {
+      logger.info(
+        {
+          group: group.name,
+          chatJid,
+          progress: result.progress,
+        },
+        `Agent progress: ${summarizeProgress(result.progress)}`,
+      );
+      return;
+    }
+
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);

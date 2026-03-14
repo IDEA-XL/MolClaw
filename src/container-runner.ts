@@ -44,10 +44,27 @@ export interface ContainerInput {
 }
 
 export interface ContainerOutput {
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'progress';
   result: string | null;
   newSessionId?: string;
   error?: string;
+  progress?: AgentProgressEvent;
+}
+
+export interface AgentProgressEvent {
+  type: 'lifecycle' | 'provider' | 'tool';
+  stage: 'start' | 'end' | 'info' | 'error';
+  message?: string;
+  round?: number;
+  model?: string;
+  toolName?: string;
+  toolCallId?: string;
+  argsSummary?: string;
+  durationMs?: number;
+  success?: boolean;
+  contentChars?: number;
+  toolCalls?: number;
+  timestamp: string;
 }
 
 interface VolumeMount {
@@ -202,6 +219,15 @@ function readSecrets(): Record<string, string> {
     'LLM_MAX_TOKENS',
     'LLM_TEMPERATURE',
     'LLM_THINKING_TYPE',
+    // Proxy settings for network-restricted environments.
+    'HTTPS_PROXY',
+    'https_proxy',
+    'HTTP_PROXY',
+    'http_proxy',
+    'ALL_PROXY',
+    'all_proxy',
+    'NO_PROXY',
+    'no_proxy',
   ];
   const secrets: Record<string, string> = {};
   const content = fs.readFileSync(envFile, 'utf-8');
@@ -221,6 +247,34 @@ function readSecrets(): Record<string, string> {
       value = value.slice(1, -1);
     }
     if (value) secrets[key] = value;
+  }
+
+  // Inside Docker containers, localhost/127.0.0.1 points to the container
+  // itself, not the host machine where proxy apps usually run.
+  const proxyKeys = [
+    'HTTPS_PROXY',
+    'https_proxy',
+    'HTTP_PROXY',
+    'http_proxy',
+    'ALL_PROXY',
+    'all_proxy',
+  ];
+  for (const key of proxyKeys) {
+    const raw = secrets[key];
+    if (!raw) continue;
+    try {
+      const u = new URL(raw);
+      if (
+        u.hostname === '127.0.0.1' ||
+        u.hostname === 'localhost' ||
+        u.hostname === '::1'
+      ) {
+        u.hostname = 'host.docker.internal';
+        secrets[key] = u.toString();
+      }
+    } catch {
+      // keep original if not a valid URL
+    }
   }
 
   return secrets;
@@ -345,7 +399,9 @@ export async function runContainerAgent(
             if (parsed.newSessionId) {
               newSessionId = parsed.newSessionId;
             }
-            hadStreamingOutput = true;
+            if (parsed.status !== 'progress') {
+              hadTerminalOutput = true;
+            }
             // Activity detected — reset the hard timeout
             resetTimeout();
             // Call onOutput for all markers (including null results)
@@ -384,7 +440,7 @@ export async function runContainerAgent(
     });
 
     let timedOut = false;
-    let hadStreamingOutput = false;
+    let hadTerminalOutput = false;
     const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
     // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
     // graceful _close sentinel has time to trigger before the hard kill fires.
@@ -423,13 +479,13 @@ export async function runContainerAgent(
           `Container: ${containerName}`,
           `Duration: ${duration}ms`,
           `Exit Code: ${code}`,
-          `Had Streaming Output: ${hadStreamingOutput}`,
+          `Had Terminal Output: ${hadTerminalOutput}`,
         ].join('\n'));
 
         // Timeout after output = idle cleanup, not failure.
         // The agent already sent its response; this is just the
         // container being reaped after the idle period expired.
-        if (hadStreamingOutput) {
+        if (hadTerminalOutput) {
           logger.info(
             { group: group.name, containerName, duration, code },
             'Container timed out after output (idle cleanup)',
