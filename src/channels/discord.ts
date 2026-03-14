@@ -150,20 +150,31 @@ export class DiscordChannel implements Channel {
       // Store chat metadata for discovery
       this.opts.onChatMetadata(chatJid, timestamp, chatName);
 
-      // Only deliver full message for registered groups
+      // Only deliver full message for registered groups.
+      // Auto-register Discord channels (DM + guild text) on first contact so
+      // the bot can respond immediately without manual setup.
       let group = this.opts.registeredGroups()[chatJid];
-      if (!group && message.guild === null && this.opts.registerGroup) {
-        // Auto-register Discord DMs so first contact works out of the box.
-        const dmFolder = `discord-dm-${channelId}`;
+      if (!group && this.opts.registerGroup) {
+        const isDm = message.guild === null;
+        const folder = isDm
+          ? `discord-dm-${channelId}`
+          : `discord-guild-${message.guild!.id}-${channelId}`;
         this.opts.registerGroup(chatJid, {
           name: chatName,
-          folder: dmFolder,
+          folder,
           trigger: `@${ASSISTANT_NAME}`,
           added_at: new Date().toISOString(),
-          requiresTrigger: false,
+          // DMs behave like private chat (no trigger required),
+          // guild channels require @mention trigger by default.
+          requiresTrigger: isDm ? false : true,
         });
         group = this.opts.registeredGroups()[chatJid];
-        logger.info({ chatJid, folder: dmFolder }, 'Auto-registered Discord DM');
+        logger.info(
+          { chatJid, folder, isDm },
+          isDm
+            ? 'Auto-registered Discord DM'
+            : 'Auto-registered Discord guild channel',
+        );
       }
 
       if (!group) {
