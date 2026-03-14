@@ -2,12 +2,15 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
+  clearSession,
   createTask,
   deleteTask,
   getAllChats,
   getRecentMessages,
   getMessagesSince,
   getNewMessages,
+  getSession,
+  setSession,
   getTaskById,
   storeChatMetadata,
   storeMessage,
@@ -287,6 +290,16 @@ describe('storeChatMetadata', () => {
     storeChatMetadata('group@g.us', '2024-01-01T00:00:01.000Z');
     const chats = getAllChats();
     expect(chats[0].last_message_time).toBe('2024-01-01T00:00:05.000Z');
+  });
+});
+
+describe('session accessors', () => {
+  it('sets, reads, and clears a session by group folder', () => {
+    expect(getSession('group-a')).toBeUndefined();
+    setSession('group-a', 'session-123');
+    expect(getSession('group-a')).toBe('session-123');
+    clearSession('group-a');
+    expect(getSession('group-a')).toBeUndefined();
   });
 });
 

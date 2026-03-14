@@ -49,6 +49,11 @@ interface AgentProgressEvent {
   contentChars?: number;
   contentTokenCount?: number;
   contentPreview?: string;
+  reasoningChars?: number;
+  reasoningTokenCount?: number;
+  reasoningPreview?: string;
+  contentSource?: string;
+  reasoningSource?: string;
   outputPreview?: string;
   output?: string;
   toolCalls?: number;
@@ -94,7 +99,17 @@ interface ChatCompletionResponse {
       role?: string;
       content?: unknown;
       tool_calls?: ToolCall[];
+      reasoning?: unknown;
+      reasoning_content?: unknown;
+      thinking?: unknown;
+      analysis?: unknown;
+      text?: unknown;
+      output_text?: unknown;
     };
+    reasoning?: unknown;
+    reasoning_content?: unknown;
+    thinking?: unknown;
+    text?: unknown;
   }>;
   error?: {
     message?: string;
@@ -885,26 +900,63 @@ function trimMessages(messages: ChatMessage[], maxChars = 140_000): ChatMessage[
     total += size;
   }
 
-  return removeOrphanToolMessages(trimmed);
+  return sanitizeMessagesForProvider(trimmed);
 }
 
-function removeOrphanToolMessages(messages: ChatMessage[]): ChatMessage[] {
-  const validToolCallIds = new Set<string>();
+function sanitizeMessagesForProvider(messages: ChatMessage[]): ChatMessage[] {
+  const sanitized: ChatMessage[] = [];
+  const availableToolCallIds = new Set<string>();
 
   for (const message of messages) {
-    if (message.role !== 'assistant' || !message.tool_calls) continue;
-    for (const toolCall of message.tool_calls) {
-      if (toolCall && typeof toolCall.id === 'string' && toolCall.id) {
-        validToolCallIds.add(toolCall.id);
+    if (message.role === 'assistant') {
+      const normalizedToolCalls = Array.isArray(message.tool_calls)
+        ? message.tool_calls.filter((toolCall) =>
+          !!toolCall
+          && typeof toolCall.id === 'string'
+          && !!toolCall.id.trim()
+          && !!toolCall.function
+          && typeof toolCall.function.name === 'string'
+          && !!toolCall.function.name.trim())
+        : [];
+
+      if (normalizedToolCalls.length > 0) {
+        for (const toolCall of normalizedToolCalls) {
+          availableToolCallIds.add(toolCall.id);
+        }
+        sanitized.push({
+          role: 'assistant',
+          content: typeof message.content === 'string' ? message.content : '',
+          tool_calls: normalizedToolCalls,
+        });
+      } else {
+        sanitized.push({
+          role: 'assistant',
+          content: typeof message.content === 'string' ? message.content : extractTextContent(message.content),
+        });
       }
+      continue;
     }
+
+    if (message.role === 'tool') {
+      if (!message.tool_call_id || !availableToolCallIds.has(message.tool_call_id)) {
+        continue;
+      }
+      sanitized.push({
+        role: 'tool',
+        tool_call_id: message.tool_call_id,
+        name: message.name,
+        content: typeof message.content === 'string' ? message.content : extractTextContent(message.content),
+      });
+      continue;
+    }
+
+    sanitized.push({
+      ...message,
+      content: typeof message.content === 'string' ? message.content : extractTextContent(message.content),
+    });
   }
 
-  return messages.filter((message) => {
-    if (message.role !== 'tool') return true;
-    if (!message.tool_call_id) return false;
-    return validToolCallIds.has(message.tool_call_id);
-  });
+  return sanitized;
 }
 
 function getMessagesCharCount(messages: ChatMessage[]): number {
@@ -1015,6 +1067,126 @@ function extractTextContent(content: unknown): string {
   return '';
 }
 
+function pushUniqueText(target: string[], value: unknown): void {
+  const text = extractTextContent(value).trim();
+  if (!text) return;
+  if (!target.includes(text)) {
+    target.push(text);
+  }
+}
+
+function isReasoningType(typeValue: unknown): boolean {
+  if (typeof typeValue !== 'string') return false;
+  const normalized = typeValue.toLowerCase();
+  return (
+    normalized.includes('reasoning')
+    || normalized.includes('thinking')
+    || normalized.includes('analysis')
+  );
+}
+
+function extractContentParts(content: unknown): { textParts: string[]; reasoningParts: string[] } {
+  const textParts: string[] = [];
+  const reasoningParts: string[] = [];
+
+  if (!Array.isArray(content)) {
+    pushUniqueText(textParts, content);
+    return { textParts, reasoningParts };
+  }
+
+  for (const part of content) {
+    if (typeof part === 'string') {
+      pushUniqueText(textParts, part);
+      continue;
+    }
+
+    if (!part || typeof part !== 'object') {
+      continue;
+    }
+
+    const record = part as Record<string, unknown>;
+    const bucket = isReasoningType(record.type) ? reasoningParts : textParts;
+
+    pushUniqueText(bucket, record.text);
+    pushUniqueText(bucket, record.content);
+    pushUniqueText(bucket, record.output_text);
+    pushUniqueText(bucket, record.value);
+
+    if (!isReasoningType(record.type)) {
+      pushUniqueText(reasoningParts, record.reasoning);
+      pushUniqueText(reasoningParts, record.reasoning_content);
+      pushUniqueText(reasoningParts, record.thinking);
+      pushUniqueText(reasoningParts, record.analysis);
+    }
+  }
+
+  return { textParts, reasoningParts };
+}
+
+function extractProviderResponse(
+  choice: NonNullable<ChatCompletionResponse['choices']>[number] | undefined,
+): {
+  content: string;
+  reasoning: string;
+  contentSource: string;
+  reasoningSource: string;
+  toolCalls: ToolCall[];
+} {
+  const contentParts: string[] = [];
+  const reasoningParts: string[] = [];
+  const contentSources: string[] = [];
+  const reasoningSources: string[] = [];
+  const message = choice?.message;
+
+  const addContent = (source: string, value: unknown): void => {
+    const before = contentParts.length;
+    pushUniqueText(contentParts, value);
+    if (contentParts.length > before) {
+      contentSources.push(source);
+    }
+  };
+
+  const addReasoning = (source: string, value: unknown): void => {
+    const before = reasoningParts.length;
+    pushUniqueText(reasoningParts, value);
+    if (reasoningParts.length > before) {
+      reasoningSources.push(source);
+    }
+  };
+
+  if (message) {
+    if (Array.isArray(message.content)) {
+      const { textParts, reasoningParts: contentReasoningParts } = extractContentParts(message.content);
+      for (const text of textParts) pushUniqueText(contentParts, text);
+      for (const text of contentReasoningParts) pushUniqueText(reasoningParts, text);
+      if (textParts.length > 0) contentSources.push('message.content[]');
+      if (contentReasoningParts.length > 0) reasoningSources.push('message.content[]');
+    } else {
+      addContent('message.content', message.content);
+    }
+
+    addContent('message.text', message.text);
+    addContent('message.output_text', message.output_text);
+    addReasoning('message.reasoning', message.reasoning);
+    addReasoning('message.reasoning_content', message.reasoning_content);
+    addReasoning('message.thinking', message.thinking);
+    addReasoning('message.analysis', message.analysis);
+  }
+
+  addReasoning('choice.reasoning', choice?.reasoning);
+  addReasoning('choice.reasoning_content', choice?.reasoning_content);
+  addReasoning('choice.thinking', choice?.thinking);
+  addContent('choice.text', choice?.text);
+
+  return {
+    content: contentParts.join('\n\n').trim(),
+    reasoning: reasoningParts.join('\n\n').trim(),
+    contentSource: contentSources.join(', '),
+    reasoningSource: reasoningSources.join(', '),
+    toolCalls: Array.isArray(message?.tool_calls) ? message.tool_calls : [],
+  };
+}
+
 function loadPromptFragments(containerInput: ContainerInput): string[] {
   const fragments: string[] = [];
   const instructionFiles = ['/workspace/group/CLAUDE.md'];
@@ -1070,6 +1242,9 @@ async function callChatCompletion(
   messages: ChatMessage[],
 ): Promise<{
   content: string;
+  reasoning: string;
+  contentSource: string;
+  reasoningSource: string;
   toolCalls: ToolCall[];
   usage?: {
     promptTokens?: number;
@@ -1117,14 +1292,19 @@ async function callChatCompletion(
     throw new Error(`Provider request failed (${response.status}): ${truncate(message, 1200)}`);
   }
 
-  const message = parsed.choices?.[0]?.message;
-  if (!message) {
+  const choice = parsed.choices?.[0];
+  if (!choice?.message) {
     throw new Error(`Provider returned no choices: ${truncate(raw, 1200)}`);
   }
 
+  const extracted = extractProviderResponse(choice);
+
   return {
-    content: extractTextContent(message.content),
-    toolCalls: Array.isArray(message.tool_calls) ? message.tool_calls : [],
+    content: extracted.content,
+    reasoning: extracted.reasoning,
+    contentSource: extracted.contentSource,
+    reasoningSource: extracted.reasoningSource,
+    toolCalls: extracted.toolCalls,
     usage: parsed.usage
       ? {
           promptTokens: parsed.usage.prompt_tokens ?? parsed.usage.input_tokens,
@@ -1634,6 +1814,9 @@ async function runQuery(
     const providerStartedAt = Date.now();
     let response: {
       content: string;
+      reasoning: string;
+      contentSource: string;
+      reasoningSource: string;
       toolCalls: ToolCall[];
       usage?: {
         promptTokens?: number;
@@ -1659,8 +1842,11 @@ async function runQuery(
     }
     const providerDurationMs = Date.now() - providerStartedAt;
     const content = response.content.trim();
+    const reasoning = response.reasoning.trim();
+    const completionText = `${content}\n${reasoning}`.trim();
+    const reasoningTokenCount = estimateTokenCount(reasoning);
     const completionTokenCount =
-      response.usage?.completionTokens ?? estimateTokenCount(content);
+      response.usage?.completionTokens ?? estimateTokenCount(completionText);
     const promptTokenCount =
       response.usage?.promptTokens ??
       getMessagesTokenCount([systemPrompt, ...trimmedMessages]);
@@ -1678,24 +1864,33 @@ async function runQuery(
         .join(', '),
       contentChars: content.length,
       contentTokenCount: completionTokenCount,
+      reasoningChars: reasoning.length,
+      reasoningTokenCount,
       promptTokenCount,
       completionTokenCount,
       totalTokenCount,
       contentPreview: truncate(content, 6000),
+      reasoningPreview: truncate(reasoning, 6000),
+      contentSource: response.contentSource,
+      reasoningSource: response.reasoningSource,
     }, session.sessionId);
 
+    const assistantContent = response.toolCalls.length > 0
+      ? (response.content || '')
+      : (response.content || response.reasoning || null);
     session.messages.push({
       role: 'assistant',
-      content: response.content || null,
+      content: assistantContent,
       tool_calls: response.toolCalls.length > 0 ? response.toolCalls : undefined,
     });
 
     if (response.toolCalls.length === 0) {
+      const finalText = (content || reasoning).trim();
       writeProgress({
         type: 'lifecycle',
         stage: 'info',
         message: 'final_response_ready',
-        contentChars: content.length,
+        contentChars: finalText.length,
         contentTokenCount: completionTokenCount,
       }, session.sessionId);
       saveSession(session);
@@ -1703,7 +1898,7 @@ async function runQuery(
       return {
         newSessionId: session.sessionId,
         closedDuringQuery: false,
-        result: content || null,
+        result: finalText || null,
       };
     }
 

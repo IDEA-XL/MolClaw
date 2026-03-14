@@ -9,7 +9,33 @@ export interface DiscordChannelOpts {
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup?: (jid: string, group: RegisteredGroup) => void;
+  resetSession?: (
+    jid: string,
+    source: string,
+  ) => {
+    ok: boolean;
+    message: string;
+  };
 }
+
+const SESSION_RESET_SLASH_COMMANDS = [
+  {
+    name: 'newsession',
+    description: 'Start a new BioClaw session for this chat',
+  },
+  {
+    name: 'reset_session',
+    description: 'Reset current BioClaw session for this chat',
+  },
+  {
+    name: 'reset',
+    description: 'Reset current BioClaw session for this chat',
+  },
+] as const;
+
+const SESSION_RESET_COMMAND_NAME_SET: Set<string> = new Set(
+  SESSION_RESET_SLASH_COMMANDS.map((cmd) => cmd.name),
+);
 
 function enableDiscordGlobalWebSocketPath(): void {
   // @discordjs/ws picks between `ws` and `globalThis.WebSocket` at module
@@ -37,6 +63,69 @@ export class DiscordChannel implements Channel {
     this.opts = opts;
   }
 
+  private ensureRegisteredDiscordGroup(params: {
+    chatJid: string;
+    chatName: string;
+    channelId: string;
+    isDm: boolean;
+    guildId?: string;
+  }): RegisteredGroup | undefined {
+    const { chatJid, chatName, channelId, isDm, guildId } = params;
+    let group = this.opts.registeredGroups()[chatJid];
+    if (!group && this.opts.registerGroup) {
+      const folder = isDm
+        ? `discord-dm-${channelId}`
+        : `discord-guild-${guildId}-${channelId}`;
+      this.opts.registerGroup(chatJid, {
+        name: chatName,
+        folder,
+        trigger: `@${ASSISTANT_NAME}`,
+        added_at: new Date().toISOString(),
+        // DMs behave like private chat (no trigger required),
+        // guild channels require @mention trigger by default.
+        requiresTrigger: isDm ? false : true,
+      });
+      group = this.opts.registeredGroups()[chatJid];
+      logger.info(
+        { chatJid, folder, isDm },
+        isDm
+          ? 'Auto-registered Discord DM'
+          : 'Auto-registered Discord guild channel',
+      );
+    }
+    return group;
+  }
+
+  private async registerSlashCommands(): Promise<void> {
+    if (!this.client || !this.client.isReady()) return;
+    const commands = SESSION_RESET_SLASH_COMMANDS.map((cmd) => ({
+      name: cmd.name,
+      description: cmd.description,
+    }));
+
+    try {
+      await this.client.application?.commands.set(commands);
+      logger.info(
+        { commandNames: commands.map((c) => c.name) },
+        'Registered global Discord slash commands',
+      );
+    } catch (err) {
+      logger.warn({ err }, 'Failed to register global Discord slash commands');
+    }
+
+    // Guild commands appear immediately and avoid global propagation delay.
+    for (const guild of this.client.guilds.cache.values()) {
+      try {
+        await guild.commands.set(commands);
+      } catch (err) {
+        logger.debug(
+          { guildId: guild.id, err },
+          'Failed to register guild slash commands',
+        );
+      }
+    }
+  }
+
   async connect(): Promise<void> {
     enableDiscordGlobalWebSocketPath();
     const { Client, Events, GatewayIntentBits, Partials } = await import(
@@ -52,6 +141,60 @@ export class DiscordChannel implements Channel {
       ],
       // Required to receive DM messages reliably in discord.js v14.
       partials: [Partials.Channel],
+    });
+
+    this.client.on(Events.InteractionCreate, async (interaction: any) => {
+      if (!interaction?.isChatInputCommand?.()) return;
+      const commandName = String(interaction.commandName || '').toLowerCase();
+      if (!SESSION_RESET_COMMAND_NAME_SET.has(commandName)) return;
+
+      const channelId = interaction.channelId;
+      if (!channelId) return;
+      const isDm = interaction.guild === null;
+      const chatJid = `dc:${channelId}`;
+      const senderName =
+        interaction.member?.displayName ||
+        interaction.user?.displayName ||
+        interaction.user?.globalName ||
+        interaction.user?.username ||
+        'User';
+      const chatName = interaction.guild
+        ? `${interaction.guild.name} #${interaction.channel?.name || channelId}`
+        : senderName;
+
+      this.opts.onChatMetadata(chatJid, new Date().toISOString(), chatName);
+      const group = this.ensureRegisteredDiscordGroup({
+        chatJid,
+        chatName,
+        channelId,
+        isDm,
+        guildId: interaction.guild?.id,
+      });
+
+      if (!group) {
+        const content = 'This channel is not registered for BioClaw.';
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({ content, ephemeral: !isDm });
+        } else {
+          await interaction.reply({ content, ephemeral: !isDm });
+        }
+        return;
+      }
+
+      const result = this.opts.resetSession
+        ? this.opts.resetSession(chatJid, `discord_slash:${commandName}`)
+        : { ok: false, message: 'Session reset is not configured.' };
+
+      const content = result.message;
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({ content, ephemeral: !isDm });
+      } else {
+        await interaction.reply({ content, ephemeral: !isDm });
+      }
+      logger.info(
+        { chatJid, commandName, ok: result.ok },
+        'Processed Discord slash session reset command',
+      );
     });
 
     this.client.on(Events.MessageCreate, async (message: any) => {
@@ -153,29 +296,13 @@ export class DiscordChannel implements Channel {
       // Only deliver full message for registered groups.
       // Auto-register Discord channels (DM + guild text) on first contact so
       // the bot can respond immediately without manual setup.
-      let group = this.opts.registeredGroups()[chatJid];
-      if (!group && this.opts.registerGroup) {
-        const isDm = message.guild === null;
-        const folder = isDm
-          ? `discord-dm-${channelId}`
-          : `discord-guild-${message.guild!.id}-${channelId}`;
-        this.opts.registerGroup(chatJid, {
-          name: chatName,
-          folder,
-          trigger: `@${ASSISTANT_NAME}`,
-          added_at: new Date().toISOString(),
-          // DMs behave like private chat (no trigger required),
-          // guild channels require @mention trigger by default.
-          requiresTrigger: isDm ? false : true,
-        });
-        group = this.opts.registeredGroups()[chatJid];
-        logger.info(
-          { chatJid, folder, isDm },
-          isDm
-            ? 'Auto-registered Discord DM'
-            : 'Auto-registered Discord guild channel',
-        );
-      }
+      const group = this.ensureRegisteredDiscordGroup({
+        chatJid,
+        chatName,
+        channelId,
+        isDm: message.guild === null,
+        guildId: message.guild?.id,
+      });
 
       if (!group) {
         logger.debug(
@@ -201,6 +328,21 @@ export class DiscordChannel implements Channel {
       );
     });
 
+    this.client.on(Events.GuildCreate, async (guild: any) => {
+      try {
+        await guild.commands.set(SESSION_RESET_SLASH_COMMANDS);
+        logger.info(
+          { guildId: guild.id },
+          'Registered Discord slash commands for new guild',
+        );
+      } catch (err) {
+        logger.debug(
+          { guildId: guild.id, err },
+          'Failed to register slash commands for new guild',
+        );
+      }
+    });
+
     this.client.on(Events.Error, (err) => {
       logger.error({ err: err.message }, 'Discord client error');
     });
@@ -211,6 +353,9 @@ export class DiscordChannel implements Channel {
           { username: readyClient.user.tag, id: readyClient.user.id },
           'Discord bot connected',
         );
+        this.registerSlashCommands().catch((err) => {
+          logger.warn({ err }, 'Failed to setup Discord slash commands');
+        });
         resolve();
       });
       this.client!.login(this.botToken).catch(reject);

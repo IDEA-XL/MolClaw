@@ -67,6 +67,11 @@ export interface AgentProgressEvent {
   contentChars?: number;
   contentTokenCount?: number;
   contentPreview?: string;
+  reasoningChars?: number;
+  reasoningTokenCount?: number;
+  reasoningPreview?: string;
+  contentSource?: string;
+  reasoningSource?: string;
   outputPreview?: string;
   output?: string;
   toolCalls?: number;

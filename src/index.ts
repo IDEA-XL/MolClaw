@@ -41,6 +41,7 @@ import {
   getNewMessages,
   getRouterState,
   initDatabase,
+  clearSession,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -107,7 +108,9 @@ function summarizeProgress(progress?: AgentProgressEvent): string {
       progress.totalTokenCount !== undefined
         ? ` totalTokens=${progress.totalTokenCount}`
         : '';
-    return `provider ${progress.stage}${round}${model}${duration}${toolCalls}${promptTokens}${completionTokens}${totalTokens}`;
+    const reasoningChars =
+      progress.reasoningChars !== undefined ? ` reasoningChars=${progress.reasoningChars}` : '';
+    return `provider ${progress.stage}${round}${model}${duration}${toolCalls}${promptTokens}${completionTokens}${totalTokens}${reasoningChars}`;
   }
 
   if (progress.type === 'tool') {
@@ -183,6 +186,103 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   );
 }
 
+interface SessionResetResult {
+  ok: boolean;
+  chatJid: string;
+  groupFolder?: string;
+  previousSessionId?: string;
+  message: string;
+}
+
+const NEW_SESSION_COMMANDS = new Set([
+  'newsession',
+  'new_session',
+  'newchat',
+  'reset',
+  'resetsession',
+  'reset_session',
+]);
+
+function parseSessionResetCommand(raw: string): boolean {
+  let text = raw.trim();
+  if (!text) return false;
+
+  const triggerPrefix = `@${ASSISTANT_NAME}`;
+  if (text.toLowerCase().startsWith(triggerPrefix.toLowerCase())) {
+    text = text.slice(triggerPrefix.length).trim();
+  }
+
+  if (!text) {
+    return false;
+  }
+
+  const parts = text.split(/\s+/).filter(Boolean);
+  if (parts.length !== 1) {
+    return false;
+  }
+
+  const token = parts[0];
+  const normalized = token.startsWith('/')
+    ? token.slice(1).toLowerCase()
+    : token.toLowerCase();
+  return NEW_SESSION_COMMANDS.has(normalized);
+}
+
+function resetChatSession(chatJid: string, source: string): SessionResetResult {
+  const group = registeredGroups[chatJid];
+  if (!group) {
+    return {
+      ok: false,
+      chatJid,
+      message: `Group ${chatJid} is not registered.`,
+    };
+  }
+
+  const previousSessionId = sessions[group.folder];
+  if (previousSessionId) {
+    delete sessions[group.folder];
+  }
+  clearSession(group.folder);
+
+  queue.closeStdin(chatJid);
+
+  const payload: Record<string, unknown> = {
+    message: 'session_reset',
+    source,
+    previousSessionId: previousSessionId || null,
+  };
+  recordAgentEvent({
+    ts: new Date().toISOString(),
+    chatJid,
+    groupFolder: group.folder,
+    eventType: 'lifecycle',
+    stage: 'info',
+    payload,
+  });
+
+  logger.info(
+    { chatJid, groupFolder: group.folder, source, previousSessionId: previousSessionId || null },
+    'Session reset requested',
+  );
+
+  return {
+    ok: true,
+    chatJid,
+    groupFolder: group.folder,
+    previousSessionId,
+    message: previousSessionId
+      ? `Started a new session (previous: ${previousSessionId}).`
+      : 'Started a new session.',
+  };
+}
+
+function buildDashboardUrl(host: string, port: number, token?: string): string {
+  const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host;
+  const base = `http://${displayHost}:${port}/`;
+  if (!token) return base;
+  return `${base}?token=${encodeURIComponent(token)}`;
+}
+
 /**
  * Get available groups list for the agent.
  * Returns groups ordered by most recent activity.
@@ -240,6 +340,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       TRIGGER_PATTERN.test(m.content.trim()),
     );
     if (!hasTrigger) return true;
+  }
+
+  const latestMessage = missedMessages[missedMessages.length - 1];
+  if (latestMessage && parseSessionResetCommand(latestMessage.content)) {
+    const resetResult = resetChatSession(chatJid, 'chat_command');
+    const ack = formatOutbound(channel, resetResult.message);
+    if (ack) {
+      await channel.sendMessage(chatJid, ack);
+    }
+    lastAgentTimestamp[chatJid] = latestMessage.timestamp;
+    saveState();
+    return true;
   }
 
   const prompt = formatMessages(missedMessages);
@@ -511,6 +623,24 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
+          const latestPending = messagesToSend[messagesToSend.length - 1];
+          const channel = findChannel(channels, chatJid);
+          if (!channel) {
+            logger.warn({ chatJid }, 'No channel owns JID in message loop');
+            continue;
+          }
+
+          if (latestPending && parseSessionResetCommand(latestPending.content)) {
+            const resetResult = resetChatSession(chatJid, 'chat_command');
+            const ack = formatOutbound(channel, resetResult.message);
+            if (ack) {
+              await channel.sendMessage(chatJid, ack);
+            }
+            lastAgentTimestamp[chatJid] = latestPending.timestamp;
+            saveState();
+            continue;
+          }
+
           const formatted = formatMessages(messagesToSend);
 
           if (queue.sendMessage(chatJid, formatted)) {
@@ -597,19 +727,41 @@ async function main(): Promise<void> {
   loadState();
 
   // Graceful shutdown handlers
+  let isShuttingDown = false;
+  const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T | null> => {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<null>((resolve) => {
+          timeout = setTimeout(() => {
+            logger.warn({ timeoutMs }, `${label} timed out`);
+            resolve(null);
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    }
+  };
+
   const shutdown = async (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
     logger.info({ signal }, 'Shutdown signal received');
     if (dashboardServer) {
       try {
-        await dashboardServer.close();
+        await withTimeout(dashboardServer.close(), 3000, 'Dashboard shutdown');
       } catch (err) {
         logger.warn({ err }, 'Failed to stop dashboard server cleanly');
       }
       dashboardServer = null;
     }
-    await queue.shutdown(10000);
+    await withTimeout(queue.shutdown(10000), 3000, 'Queue shutdown');
     for (const ch of channels) {
-      await ch.disconnect();
+      await withTimeout(ch.disconnect(), 3000, `Channel(${ch.name}) disconnect`);
     }
     process.exit(0);
   };
@@ -684,6 +836,7 @@ async function main(): Promise<void> {
         storeChatMetadata(chatJid, timestamp, name),
       registeredGroups: () => registeredGroups,
       registerGroup,
+      resetSession: (chatJid, source) => resetChatSession(chatJid, source),
     });
     channels.push(discord);
     await discord.connect();
@@ -714,16 +867,28 @@ async function main(): Promise<void> {
     process.env.DASHBOARD_TOKEN || env.DASHBOARD_TOKEN || DASHBOARD_TOKEN;
 
   if (dashboardEnabled) {
+    const effectiveDashboardPort = Number.isFinite(dashboardPort)
+      ? dashboardPort
+      : DASHBOARD_PORT;
     dashboardServer = startDashboardServer(
       {
         host: dashboardHost,
-        port: Number.isFinite(dashboardPort) ? dashboardPort : DASHBOARD_PORT,
+        port: effectiveDashboardPort,
         token: dashboardToken || undefined,
       },
       {
         getQueueSnapshot: () => queue.getSnapshot(),
+        resetSession: (chatJid) => resetChatSession(chatJid, 'dashboard'),
       },
     );
+    const dashboardUrl = buildDashboardUrl(
+      dashboardHost,
+      effectiveDashboardPort,
+      dashboardToken || undefined,
+    );
+    logger.info({ url: dashboardUrl }, 'Dashboard URL');
+    // Plain console link for IDE terminals with click-to-open support.
+    console.log(`Dashboard: ${dashboardUrl}`);
   }
 
   // Start subsystems (independently of connection handler)

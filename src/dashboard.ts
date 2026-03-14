@@ -1,4 +1,5 @@
 import http from 'node:http';
+import type { Socket } from 'node:net';
 import { URL } from 'node:url';
 
 import { ASSISTANT_NAME } from './config.js';
@@ -22,6 +23,12 @@ export interface DashboardOptions {
 
 export interface DashboardDeps {
   getQueueSnapshot: () => GroupQueueSnapshot;
+  resetSession: (chatJid: string) => {
+    ok: boolean;
+    message: string;
+    previousSessionId?: string;
+    groupFolder?: string;
+  };
 }
 
 export interface DashboardServerHandle {
@@ -164,7 +171,7 @@ function getDashboardHtml(): string {
     }
     .toolbar {
       display: grid;
-      grid-template-columns: 1fr auto auto;
+      grid-template-columns: 1fr auto auto auto;
       gap: 6px;
       padding: 8px;
       border-bottom: 1px solid #edf2f8;
@@ -258,6 +265,12 @@ function getDashboardHtml(): string {
       align-self: flex-start;
       border-color: #bfd5ff;
       background: #f4f8ff;
+    }
+    .msg.round {
+      align-self: flex-start;
+      border-color: #b8c9e8;
+      background: #f8fbff;
+      max-width: min(780px, 96%);
     }
     .msg.tool-call,
     .msg.tool-result {
@@ -386,6 +399,28 @@ function getDashboardHtml(): string {
     details.fold[open] > summary {
       background: #e7f0ff;
     }
+    .round-summary {
+      display: grid;
+      gap: 4px;
+      margin-top: 4px;
+      margin-bottom: 4px;
+    }
+    .round-step {
+      border: 1px solid #d8e3f3;
+      border-radius: 8px;
+      background: #fff;
+      padding: 6px 8px;
+      margin-bottom: 6px;
+    }
+    .round-step:last-child {
+      margin-bottom: 0;
+    }
+    .round-step-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: #334e70;
+      margin-bottom: 5px;
+    }
 
     .ctx {
       padding: 10px;
@@ -462,6 +497,7 @@ function getDashboardHtml(): string {
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#475467;padding:0 4px;">
           <input type="checkbox" id="show-ops" /> show ops
         </label>
+        <button id="new-session-btn">New Session</button>
         <button id="pause-btn">Pause</button>
       </div>
       <div class="timeline-wrap" id="timeline-wrap">
@@ -501,6 +537,7 @@ function getDashboardHtml(): string {
     const groupSearchEl = document.getElementById('group-search');
     const timelineSearchEl = document.getElementById('timeline-search');
     const showOpsEl = document.getElementById('show-ops');
+    const newSessionBtnEl = document.getElementById('new-session-btn');
     const pauseBtnEl = document.getElementById('pause-btn');
 
     function esc(s) {
@@ -538,6 +575,7 @@ function getDashboardHtml(): string {
       if (a.ts === b.ts) {
         const order = {
           user: 0,
+          round: 1,
           provider: 1,
           'tool-call': 2,
           'tool-result': 3,
@@ -745,7 +783,138 @@ function getDashboardHtml(): string {
         + '</details>';
     }
 
+    function providerVisibleText(payload) {
+      const content = typeof payload.contentPreview === 'string' ? payload.contentPreview.trim() : '';
+      const reasoning = typeof payload.reasoningPreview === 'string' ? payload.reasoningPreview.trim() : '';
+      if (content) return { text: content, reasoning, note: '' };
+      if (reasoning) {
+        return {
+          text: '',
+          reasoning,
+          note: 'provider exposed only reasoning/analysis text in this round',
+        };
+      }
+      if (Number(payload.toolCalls || 0) > 0) {
+        return {
+          text: '',
+          reasoning: '',
+          note: 'provider returned tool calls only (no non-tool text exposed by API)',
+        };
+      }
+      return {
+        text: '',
+        reasoning: '',
+        note: typeof payload.message === 'string' ? payload.message : 'provider returned no visible text',
+      };
+    }
+
+    function normalizeRound(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return null;
+      if (n <= 0) return null;
+      return Math.trunc(n);
+    }
+
+    function buildRoundBody(payload) {
+      const provider = payload.provider || {};
+      const context = payload.context || {};
+      const toolStarts = Array.isArray(payload.toolStarts) ? payload.toolStarts : [];
+      const toolResults = Array.isArray(payload.toolResults) ? payload.toolResults : [];
+      const round = payload.round;
+
+      const providerView = providerVisibleText(provider);
+      const toolNames = Array.from(new Set(toolStarts.map((s) => s && s.payload && s.payload.toolName).filter(Boolean)));
+      const tokenSummary = summarizeTokens(provider);
+      const historyTokens = resolveHistoryTokens(context);
+      const trimmedTokens = resolveTrimmedTokens(context);
+
+      const providerHtml = ''
+        + '<div class=\"round-step\">'
+        + '  <div class=\"round-step-title\">Provider</div>'
+        + (provider.model ? '<div class=\"msg-meta\">model=' + esc(provider.model) + '</div>' : '')
+        + (tokenSummary ? '<div class=\"msg-meta\">' + esc(tokenSummary) + '</div>' : '')
+        + (providerView.note ? '<div class=\"msg-body muted\">' + esc(providerView.note) + '</div>' : '')
+        + (providerView.text ? renderTextWithCodeBlocks(providerView.text) : '')
+        + (providerView.reasoning
+          ? '<details class=\"fold\"><summary>reasoning / analysis</summary>' + renderTextWithCodeBlocks(providerView.reasoning) + '</details>'
+          : '')
+        + '</div>';
+
+      const usedResult = new Set();
+      const pairedSteps = [];
+      for (const start of toolStarts) {
+        const startPayload = start && start.payload ? start.payload : {};
+        const toolCallId = startPayload.toolCallId;
+        let matched = null;
+        for (let i = 0; i < toolResults.length; i += 1) {
+          if (usedResult.has(i)) continue;
+          const candidate = toolResults[i];
+          const candidatePayload = candidate && candidate.payload ? candidate.payload : {};
+          if (toolCallId && candidatePayload.toolCallId === toolCallId) {
+            matched = { index: i, event: candidate };
+            break;
+          }
+          if (!toolCallId && candidatePayload.toolName === startPayload.toolName) {
+            matched = { index: i, event: candidate };
+            break;
+          }
+        }
+        if (matched) {
+          usedResult.add(matched.index);
+        }
+        pairedSteps.push({
+          start,
+          result: matched ? matched.event : null,
+        });
+      }
+
+      for (let i = 0; i < toolResults.length; i += 1) {
+        if (usedResult.has(i)) continue;
+        pairedSteps.push({
+          start: null,
+          result: toolResults[i],
+        });
+      }
+
+      const toolHtml = pairedSteps.length > 0
+        ? pairedSteps.map((step, idx) => {
+            const startPayload = step.start && step.start.payload ? step.start.payload : {};
+            const resultPayload = step.result && step.result.payload ? step.result.payload : {};
+            const toolName = startPayload.toolName || resultPayload.toolName || ('tool #' + (idx + 1));
+            const resultStage = step.result && step.result.stage ? step.result.stage : '';
+            const title = resultStage === 'error' ? 'Tool error' : 'Tool';
+            return ''
+              + '<div class=\"round-step\">'
+              + '  <div class=\"round-step-title\">' + esc(title + ': ' + toolName) + '</div>'
+              + (step.start ? renderToolCallBody(startPayload, startPayload.argsSummary || '') : '<div class=\"msg-body muted\">tool call event missing</div>')
+              + (step.result
+                ? '<details class=\"fold\"><summary>' + esc((resultStage === 'error' ? 'error' : 'result') + ' output') + '</summary>' + renderToolResultBody(resultPayload, '') + '</details>'
+                : '<div class=\"msg-body muted\">tool result not received</div>')
+              + '</div>';
+          }).join('')
+        : '<div class=\"round-step\"><div class=\"msg-body muted\">No tool events in this round.</div></div>';
+
+      const roundSummary = [
+        'round=' + round,
+        provider.model ? ('model=' + provider.model) : '',
+        toolNames.length > 0 ? ('tools=' + toolNames.join(', ')) : 'tools=none',
+        tokenSummary || '',
+        historyTokens != null ? ('historyTokens=' + historyTokens) : '',
+        trimmedTokens != null ? ('trimmedTokens=' + trimmedTokens) : '',
+      ].filter(Boolean).join(' · ');
+
+      return ''
+        + '<div class=\"round-summary\"><div class=\"msg-body\">' + esc(roundSummary) + '</div></div>'
+        + '<details class=\"fold\"><summary>expand round details</summary>'
+        + providerHtml
+        + toolHtml
+        + '</details>';
+    }
+
     function renderItemBody(item) {
+      if (item.kind === 'round') {
+        return buildRoundBody(item.payload || {});
+      }
       if (item.kind === 'tool-call') {
         return renderToolCallBody(item.payload || {}, item.body || '');
       }
@@ -768,64 +937,69 @@ function getDashboardHtml(): string {
         });
       }
 
+      const sessionQueryIndex = new Map();
+      let globalQueryIndex = 0;
+      const queryKeyByEventId = new Map();
+
       for (const e of allEvents) {
         const p = getEventPayload(e);
+        const sessionId = (typeof e.sessionId === 'string' && e.sessionId.trim())
+          ? e.sessionId.trim()
+          : '__no_session__';
 
-        if (e.eventType === 'provider' && e.stage === 'end') {
-          const providerText = (typeof p.contentPreview === 'string' && p.contentPreview.trim())
-            ? p.contentPreview
-            : (Number(p.toolCalls || 0) > 0
-              ? 'model returned tool calls only: ' + (p.toolCallNames || (p.toolCalls + ' call(s)'))
-              : (p.message || ''));
-          if (!providerText) {
-            continue;
+        if (e.eventType === 'lifecycle' && p.message === 'query_started') {
+          const next = (sessionQueryIndex.get(sessionId) || 0) + 1;
+          sessionQueryIndex.set(sessionId, next);
+          globalQueryIndex += 1;
+          queryKeyByEventId.set(e.id, sessionId + ':q' + next + ':g' + globalQueryIndex);
+          continue;
+        }
+
+        const current = sessionQueryIndex.get(sessionId) || 0;
+        queryKeyByEventId.set(
+          e.id,
+          sessionId + ':q' + current + ':g' + globalQueryIndex,
+        );
+      }
+
+      const roundBuckets = new Map();
+      for (const e of allEvents) {
+        const p = getEventPayload(e);
+        const round = normalizeRound(p.round);
+        const isRoundEvent = round != null && (
+          (e.eventType === 'provider' && e.stage === 'end')
+          || (e.eventType === 'tool' && (e.stage === 'start' || e.stage === 'end' || e.stage === 'error'))
+          || (showOpsEl.checked && e.eventType === 'context')
+        );
+
+        if (isRoundEvent) {
+          const queryKey = queryKeyByEventId.get(e.id) || '__unknown__:q0:g0';
+          const roundKey = queryKey + ':r' + round;
+          const existing = roundBuckets.get(roundKey) || {
+            key: roundKey,
+            round,
+            queryKey,
+            sessionId: e.sessionId || null,
+            tsStart: e.ts,
+            tsEnd: e.ts,
+            provider: null,
+            context: null,
+            toolStarts: [],
+            toolResults: [],
+          };
+          if (e.ts < existing.tsStart) existing.tsStart = e.ts;
+          if (e.ts > existing.tsEnd) existing.tsEnd = e.ts;
+
+          if (e.eventType === 'provider' && e.stage === 'end') {
+            existing.provider = p;
+          } else if (e.eventType === 'context') {
+            existing.context = p;
+          } else if (e.eventType === 'tool' && e.stage === 'start') {
+            existing.toolStarts.push({ ts: e.ts, stage: e.stage, payload: p });
+          } else if (e.eventType === 'tool' && (e.stage === 'end' || e.stage === 'error')) {
+            existing.toolResults.push({ ts: e.ts, stage: e.stage, payload: p });
           }
-          items.push({
-            key: 'e-' + e.id,
-            ts: e.ts,
-            kind: 'provider',
-            role: 'provider',
-            meta: [
-              p.round != null ? 'round=' + p.round : '',
-              p.durationMs != null ? 'durationMs=' + p.durationMs : '',
-              summarizeTokens(p),
-            ].filter(Boolean).join(' · '),
-            body: providerText,
-            payload: p,
-          });
-          continue;
-        }
-
-        if (e.eventType === 'tool' && e.stage === 'start') {
-          items.push({
-            key: 'e-' + e.id,
-            ts: e.ts,
-            kind: 'tool-call',
-            role: 'tool call',
-            meta: [
-              p.round != null ? 'round=' + p.round : '',
-              p.toolName ? 'tool=' + p.toolName : '',
-            ].filter(Boolean).join(' · '),
-            body: p.argsSummary || '',
-            payload: p,
-          });
-          continue;
-        }
-
-        if (e.eventType === 'tool' && (e.stage === 'end' || e.stage === 'error')) {
-          items.push({
-            key: 'e-' + e.id,
-            ts: e.ts,
-            kind: e.stage === 'error' ? 'error' : 'tool-result',
-            role: e.stage === 'error' ? 'tool error' : 'tool result',
-            meta: [
-              p.round != null ? 'round=' + p.round : '',
-              p.toolName ? 'tool=' + p.toolName : '',
-              p.durationMs != null ? 'durationMs=' + p.durationMs : '',
-            ].filter(Boolean).join(' · '),
-            body: extractToolOutput(p),
-            payload: p,
-          });
+          roundBuckets.set(roundKey, existing);
           continue;
         }
 
@@ -855,14 +1029,8 @@ function getDashboardHtml(): string {
           continue;
         }
 
-        if (showOpsEl.checked && (e.eventType === 'context' || e.eventType === 'lifecycle')) {
-          const summary = e.eventType === 'context'
-            ? 'round=' + (p.round ?? '-')
-              + ' historyMsgs=' + (p.historyMessageCount ?? '-')
-              + ' historyTokens=' + (resolveHistoryTokens(p) ?? '-')
-              + ' trimmedMsgs=' + (p.trimmedMessageCount ?? '-')
-              + ' trimmedTokens=' + (resolveTrimmedTokens(p) ?? '-')
-            : (p.message || e.stage);
+        if (showOpsEl.checked && e.eventType === 'lifecycle') {
+          const summary = p.message || e.stage;
           items.push({
             key: 'e-' + e.id,
             ts: e.ts,
@@ -875,6 +1043,24 @@ function getDashboardHtml(): string {
         }
       }
 
+      const roundItems = Array.from(roundBuckets.values())
+        .sort((a, b) => (a.tsStart < b.tsStart ? -1 : a.tsStart > b.tsStart ? 1 : 0))
+        .map((roundEvent) => ({
+          key: 'r-' + roundEvent.key,
+          ts: roundEvent.tsStart,
+          kind: 'round',
+          role: 'round ' + roundEvent.round,
+          meta: [
+            roundEvent.provider && roundEvent.provider.durationMs != null
+              ? ('durationMs=' + roundEvent.provider.durationMs)
+              : '',
+            roundEvent.provider ? summarizeTokens(roundEvent.provider) : '',
+          ].filter(Boolean).join(' · '),
+          body: '',
+          payload: roundEvent,
+        }));
+
+      items.push(...roundItems);
       items.sort(compareByTs);
       return items;
     }
@@ -936,7 +1122,17 @@ function getDashboardHtml(): string {
         const p = getEventPayload(e);
         if (typeof p.model === 'string' && p.model.trim()) return p.model.trim();
       }
-      return '-';
+      return 'n/a';
+    }
+
+    function getLatestSessionId() {
+      for (let i = allEvents.length - 1; i >= 0; i -= 1) {
+        const e = allEvents[i];
+        if (typeof e.sessionId === 'string' && e.sessionId.trim()) {
+          return e.sessionId.trim();
+        }
+      }
+      return 'n/a';
     }
 
     function buildRoundRows() {
@@ -993,6 +1189,7 @@ function getDashboardHtml(): string {
       const ctx = latestContext ? getEventPayload(latestContext) : {};
       const provider = latestProvider ? getEventPayload(latestProvider) : {};
       const modelVersion = getLatestModelVersion();
+      const latestSessionId = getLatestSessionId();
       const historyTokens = resolveHistoryTokens(ctx);
       const trimmedTokens = resolveTrimmedTokens(ctx);
       const promptTokens = resolvePromptTokens(provider, ctx);
@@ -1024,12 +1221,13 @@ function getDashboardHtml(): string {
       contextEl.innerHTML = ''
         + '<div class="card">'
         + '  <p class="card-title">Latest Snapshot</p>'
+        + '  <div class="kv"><span class="muted">session</span><span>' + esc(latestSessionId) + '</span></div>'
         + '  <div class="kv"><span class="muted">model</span><span>' + esc(modelVersion) + '</span></div>'
-        + '  <div class="kv"><span class="muted">round</span><span>' + esc(ctx.round ?? provider.round ?? '-') + '</span></div>'
-        + '  <div class="kv"><span class="muted">history tokens</span><span>' + esc(historyTokens ?? '-') + '</span></div>'
-        + '  <div class="kv"><span class="muted">trimmed tokens</span><span>' + esc(trimmedTokens ?? '-') + '</span></div>'
+        + '  <div class="kv"><span class="muted">round</span><span>' + esc(ctx.round ?? provider.round ?? 'n/a') + '</span></div>'
+        + '  <div class="kv"><span class="muted">history tokens</span><span>' + esc(historyTokens ?? 'n/a') + '</span></div>'
+        + '  <div class="kv"><span class="muted">trimmed tokens</span><span>' + esc(trimmedTokens ?? 'n/a') + '</span></div>'
         + '  <div class="kv"><span class="muted">prompt / completion / total</span><span>'
-        +      esc((promptTokens ?? '-') + ' / ' + (completionTokens ?? '-') + ' / ' + (totalTokens ?? '-'))
+        +      esc((promptTokens ?? 'n/a') + ' / ' + (completionTokens ?? 'n/a') + ' / ' + (totalTokens ?? 'n/a'))
         + '  </span></div>'
         + '</div>'
         + '<div class="card">'
@@ -1093,6 +1291,28 @@ function getDashboardHtml(): string {
         clearTimeout(timeout);
       }
       if (!res.ok) throw new Error('HTTP ' + res.status);
+      return await res.json();
+    }
+
+    async function postJson(url) {
+      const reqUrl = new URL(url, window.location.origin);
+      if (token) reqUrl.searchParams.set('token', token);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      let res;
+      try {
+        res = await fetch(reqUrl.toString(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error('HTTP ' + res.status + ': ' + text);
+      }
       return await res.json();
     }
 
@@ -1227,6 +1447,20 @@ function getDashboardHtml(): string {
       groupSearchEl.addEventListener('input', renderGroups);
       timelineSearchEl.addEventListener('input', renderTimeline);
       showOpsEl.addEventListener('change', renderTimeline);
+      newSessionBtnEl.addEventListener('click', async () => {
+        if (!currentChat) return;
+        try {
+          newSessionBtnEl.disabled = true;
+          const result = await postJson('/api/session/reset?chat_jid=' + encodeURIComponent(currentChat));
+          setStreamStatus(result && result.message ? result.message : 'session reset');
+          await loadEvents();
+        } catch (err) {
+          setStreamStatus('session reset failed');
+          statusEl.textContent = 'error: ' + (err instanceof Error ? err.message : String(err));
+        } finally {
+          newSessionBtnEl.disabled = false;
+        }
+      });
       pauseBtnEl.addEventListener('click', () => {
         streamPaused = !streamPaused;
         pauseBtnEl.classList.toggle('active', streamPaused);
@@ -1281,6 +1515,9 @@ export function startDashboardServer(
   options: DashboardOptions,
   deps: DashboardDeps,
 ): DashboardServerHandle {
+  const sseClients = new Set<http.ServerResponse>();
+  const sockets = new Set<Socket>();
+
   const server = http.createServer((req, res) => {
     const reqUrl = new URL(req.url || '/', 'http://localhost');
 
@@ -1298,6 +1535,21 @@ export function startDashboardServer(
 
     if (reqUrl.pathname === '/api/health') {
       sendJson(res, 200, { ok: true, now: new Date().toISOString() });
+      return;
+    }
+
+    if (reqUrl.pathname === '/api/session/reset') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'Method not allowed' });
+        return;
+      }
+      const chatJid = reqUrl.searchParams.get('chat_jid');
+      if (!chatJid) {
+        sendJson(res, 400, { error: 'chat_jid is required' });
+        return;
+      }
+      const result = deps.resetSession(chatJid);
+      sendJson(res, result.ok ? 200 : 404, result);
       return;
     }
 
@@ -1376,6 +1628,7 @@ export function startDashboardServer(
         Connection: 'keep-alive',
       });
       res.write(': connected\n\n');
+      sseClients.add(res);
 
       const unsubscribe = subscribeAgentEvents((event) => {
         if (chatJid && event.chatJid !== chatJid) return;
@@ -1389,11 +1642,17 @@ export function startDashboardServer(
       req.on('close', () => {
         clearInterval(heartbeat);
         unsubscribe();
+        sseClients.delete(res);
       });
       return;
     }
 
     sendJson(res, 404, { error: 'Not found' });
+  });
+
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
   });
 
   server.listen(options.port, options.host, () => {
@@ -1405,11 +1664,25 @@ export function startDashboardServer(
 
   return {
     close: async () => {
-      await new Promise<void>((resolve, reject) => {
-        server.close((err) => {
-          if (err) reject(err);
-          else resolve();
-        });
+      for (const client of sseClients) {
+        try {
+          client.end();
+        } catch {
+          // no-op
+        }
+      }
+      sseClients.clear();
+      for (const socket of sockets) {
+        try {
+          socket.destroy();
+        } catch {
+          // no-op
+        }
+      }
+      sockets.clear();
+
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
       });
     },
   };
