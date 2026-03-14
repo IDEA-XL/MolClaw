@@ -9,6 +9,11 @@ This fork focuses on practical local deployment with an OpenAI-compatible provid
 - Multi-channel runtime:
   - Discord (DM + guild channels)
   - WhatsApp (optional, QR login)
+- Discord inbound attachments:
+  - Images/files are downloaded to per-group workspace (`inbox/discord/<date>/`)
+  - Incoming message text includes saved `/workspace/group/...` paths for agent tools
+  - Image attachments are forwarded to provider as multimodal `image_url` content when possible
+  - If model image input is unsupported, runner auto-falls back to text-only and sends a user notice
 - Isolated execution:
   - Per-group Docker container
   - Per-group workspace/session state

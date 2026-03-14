@@ -86,6 +86,35 @@ interface ChatMessage {
   name?: string;
 }
 
+interface ProviderContentTextPart {
+  type: 'text';
+  text: string;
+}
+
+interface ProviderContentImagePart {
+  type: 'image_url';
+  image_url: {
+    url: string;
+  };
+}
+
+type ProviderContentPart = ProviderContentTextPart | ProviderContentImagePart;
+
+interface ProviderChatMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | ProviderContentPart[] | null;
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+interface ProviderMessageMaterializationResult {
+  messages: ProviderChatMessage[];
+  inlineImageRequested: number;
+  inlineImageAttached: number;
+  warnings: string[];
+}
+
 interface SessionState {
   sessionId: string;
   messages: ChatMessage[];
@@ -131,6 +160,8 @@ interface ProviderConfig {
   maxTokens: number;
   temperature: number;
   thinkingType?: string;
+  supportsImageInput: boolean | null;
+  imageSupportReason: string;
 }
 
 interface ToolContext {
@@ -214,6 +245,26 @@ const CONVERSATIONS_DIR = '/workspace/group/conversations';
 const MAX_TOOL_ROUNDS = 24;
 const MAX_TOOL_OUTPUT_CHARS = 16_000;
 const MAX_FILE_READ_CHARS = 24_000;
+const DEFAULT_INLINE_IMAGE_MAX_BYTES = 5 * 1024 * 1024; // 5MB
+const INLINE_IMAGE_MAX_BYTES = Math.max(
+  64 * 1024,
+  parseInt(
+    process.env.OPENAI_COMPAT_INLINE_IMAGE_MAX_BYTES
+      || process.env.LLM_INLINE_IMAGE_MAX_BYTES
+      || `${DEFAULT_INLINE_IMAGE_MAX_BYTES}`,
+    10,
+  ) || DEFAULT_INLINE_IMAGE_MAX_BYTES,
+);
+const DEFAULT_INLINE_IMAGE_MAX_COUNT = 3;
+const INLINE_IMAGE_MAX_COUNT = Math.max(
+  1,
+  parseInt(
+    process.env.OPENAI_COMPAT_INLINE_IMAGE_MAX_COUNT
+      || process.env.LLM_INLINE_IMAGE_MAX_COUNT
+      || `${DEFAULT_INLINE_IMAGE_MAX_COUNT}`,
+    10,
+  ) || DEFAULT_INLINE_IMAGE_MAX_COUNT,
+);
 const TOOL_ENV_VARS = [
   'OPENAI_COMPAT_API_KEY',
   'OPENAI_COMPAT_BASE_URL',
@@ -616,6 +667,52 @@ function parseNumberConfig(value: string | undefined, fallback: number): number 
   return parsed;
 }
 
+function parseBooleanConfig(value: string | undefined): boolean | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on', 'enabled'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'n', 'off', 'disabled'].includes(normalized)) {
+    return false;
+  }
+  return null;
+}
+
+function inferImageSupportFromModel(model: string): boolean | null {
+  const normalized = model.trim().toLowerCase();
+  if (!normalized) return null;
+
+  const obviousTextOnly = /(embedding|rerank|whisper|tts|asr|speech|bge|e5-)/i;
+  if (obviousTextOnly.test(normalized)) {
+    return false;
+  }
+
+  const multimodalHints = [
+    /gpt-4o/i,
+    /gpt-4\.1/i,
+    /gpt-5/i,
+    /\bvision\b/i,
+    /\bvl\b/i,
+    /gemini/i,
+    /claude-3/i,
+    /claude-4/i,
+    /qwen.*vl/i,
+    /llava/i,
+    /minicpm-v/i,
+    /glm-4v/i,
+    /internvl/i,
+    /pixtral/i,
+    /yi-vl/i,
+  ];
+
+  for (const hint of multimodalHints) {
+    if (hint.test(normalized)) return true;
+  }
+
+  return null;
+}
+
 function applyRuntimeEnv(containerInput: ContainerInput): void {
   for (const key of PROXY_ENV_KEYS) {
     const val = containerInput.secrets?.[key];
@@ -639,6 +736,23 @@ function loadProviderConfig(containerInput: ContainerInput): ProviderConfig {
     log('No API key configured (OPENAI_COMPAT_API_KEY/LLM_API_KEY). Continuing without Authorization header.');
   }
 
+  const multimodalConfigRaw = readConfigValue(containerInput, [
+    'OPENAI_COMPAT_MULTIMODAL',
+    'LLM_MULTIMODAL',
+    'OPENAI_COMPAT_SUPPORTS_IMAGE',
+    'LLM_SUPPORTS_IMAGE',
+  ]);
+  const multimodalConfigured = parseBooleanConfig(multimodalConfigRaw);
+  const multimodalInferred = inferImageSupportFromModel(model);
+  const supportsImageInput =
+    multimodalConfigured !== null ? multimodalConfigured : multimodalInferred;
+  const imageSupportReason =
+    multimodalConfigured !== null
+      ? `configured by env (${multimodalConfigRaw})`
+      : multimodalInferred !== null
+        ? `inferred from model name (${model})`
+        : `unknown for model (${model})`;
+
   return {
     apiKey,
     apiUrl: normalizeBaseUrl(baseUrl),
@@ -652,6 +766,8 @@ function loadProviderConfig(containerInput: ContainerInput): ProviderConfig {
       0.2,
     ),
     thinkingType: readConfigValue(containerInput, ['OPENAI_COMPAT_THINKING_TYPE', 'LLM_THINKING_TYPE']),
+    supportsImageInput,
+    imageSupportReason,
   };
 }
 
@@ -850,6 +966,18 @@ function writeIpcFile(dir: string, data: object): string {
   fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
   fs.renameSync(tempPath, filepath);
   return filename;
+}
+
+function enqueueNoticeMessage(containerInput: ContainerInput, text: string): void {
+  const message = text.trim();
+  if (!message) return;
+  writeIpcFile(MESSAGES_DIR, {
+    type: 'message',
+    chatJid: containerInput.chatJid,
+    text: message,
+    groupFolder: containerInput.groupFolder,
+    timestamp: new Date().toISOString(),
+  });
 }
 
 function sessionFilePath(sessionId: string): string {
@@ -1216,6 +1344,229 @@ function loadPromptFragments(containerInput: ContainerInput): string[] {
   return fragments;
 }
 
+function mimeFromImagePath(filePath: string): string | null {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.webp':
+      return 'image/webp';
+    case '.gif':
+      return 'image/gif';
+    case '.bmp':
+      return 'image/bmp';
+    default:
+      return null;
+  }
+}
+
+function normalizeImageMime(rawMime: string | undefined): string | null {
+  if (!rawMime) return null;
+  const mime = rawMime.split(';')[0].trim().toLowerCase();
+  if (!mime.startsWith('image/')) return null;
+  return mime;
+}
+
+function extractInlineImageDescriptors(text: string): Array<{
+  filePath: string;
+  declaredMime?: string;
+}> {
+  const descriptors: Array<{ filePath: string; declaredMime?: string }> = [];
+  const seen = new Set<string>();
+  const lines = text.split('\n');
+
+  for (const line of lines) {
+    if (!/\[image/i.test(line)) continue;
+    const pathMatch = line.match(/saved=(\/workspace\/group\/[^\s;]+)/i);
+    if (!pathMatch) continue;
+    const filePath = pathMatch[1];
+    if (seen.has(filePath)) continue;
+    seen.add(filePath);
+
+    const typeMatch = line.match(/type=([^;]+)/i);
+    descriptors.push({
+      filePath,
+      declaredMime: typeMatch?.[1]?.trim(),
+    });
+  }
+
+  return descriptors;
+}
+
+function buildProviderUserContent(
+  rawContent: string,
+  options: {
+    allowImages: boolean;
+    disableReason?: string;
+  },
+): {
+  content: string | ProviderContentPart[];
+  requested: number;
+  attached: number;
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+
+  if (!rawContent.includes('/workspace/group/')) {
+    return {
+      content: rawContent,
+      requested: 0,
+      attached: 0,
+      warnings,
+    };
+  }
+
+  const imageDescriptors = extractInlineImageDescriptors(rawContent);
+  if (imageDescriptors.length === 0) {
+    return {
+      content: rawContent,
+      requested: 0,
+      attached: 0,
+      warnings,
+    };
+  }
+
+  if (!options.allowImages) {
+    const reason = options.disableReason || 'image input disabled';
+    warnings.push(
+      `Image inputs detected but not attached (${reason}).`,
+    );
+    return {
+      content: rawContent,
+      requested: imageDescriptors.length,
+      attached: 0,
+      warnings,
+    };
+  }
+
+  const parts: ProviderContentPart[] = [
+    { type: 'text', text: rawContent },
+  ];
+  let attached = 0;
+
+  for (const descriptor of imageDescriptors) {
+    if (attached >= INLINE_IMAGE_MAX_COUNT) {
+      warnings.push(
+        `image count exceeded limit (${INLINE_IMAGE_MAX_COUNT}); skipped: ${descriptor.filePath}`,
+      );
+      continue;
+    }
+
+    const filePath = descriptor.filePath;
+    if (!filePath.startsWith('/workspace/group/')) {
+      warnings.push(`path outside workspace: ${filePath}`);
+      continue;
+    }
+    if (!fs.existsSync(filePath)) {
+      warnings.push(`file missing: ${filePath}`);
+      continue;
+    }
+
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) {
+      warnings.push(`not a file: ${filePath}`);
+      continue;
+    }
+    if (stat.size > INLINE_IMAGE_MAX_BYTES) {
+      warnings.push(
+        `file too large (${stat.size} bytes > ${INLINE_IMAGE_MAX_BYTES}): ${filePath}`,
+      );
+      continue;
+    }
+
+    const mime = normalizeImageMime(descriptor.declaredMime) || mimeFromImagePath(filePath);
+    if (!mime) {
+      warnings.push(`unsupported image type: ${filePath}`);
+      continue;
+    }
+
+    const buffer = fs.readFileSync(filePath);
+    if (buffer.length > INLINE_IMAGE_MAX_BYTES) {
+      warnings.push(
+        `file too large after read (${buffer.length} bytes > ${INLINE_IMAGE_MAX_BYTES}): ${filePath}`,
+      );
+      continue;
+    }
+
+    const dataUrl = `data:${mime};base64,${buffer.toString('base64')}`;
+    parts.push({
+      type: 'image_url',
+      image_url: { url: dataUrl },
+    });
+    attached += 1;
+  }
+
+  if (attached === 0) {
+    if (warnings.length > 0) {
+      log(`No inline images attached to provider request: ${warnings.join(' | ')}`);
+    }
+    return {
+      content: rawContent,
+      requested: imageDescriptors.length,
+      attached: 0,
+      warnings,
+    };
+  }
+
+  log(`Attached ${attached} inline image(s) to provider user content`);
+  if (warnings.length > 0) {
+    log(`Inline image attachment warnings: ${warnings.join(' | ')}`);
+  }
+  return {
+    content: parts,
+    requested: imageDescriptors.length,
+    attached,
+    warnings,
+  };
+}
+
+function materializeMessagesForProvider(
+  messages: ChatMessage[],
+  options: {
+    allowImages: boolean;
+    disableReason?: string;
+  },
+): ProviderMessageMaterializationResult {
+  let inlineImageRequested = 0;
+  let inlineImageAttached = 0;
+  const warnings: string[] = [];
+
+  const providerMessages = messages.map((message) => {
+    if (message.role !== 'user' || typeof message.content !== 'string') {
+      return {
+        role: message.role,
+        content: message.content,
+        tool_calls: message.tool_calls,
+        tool_call_id: message.tool_call_id,
+        name: message.name,
+      };
+    }
+
+    const converted = buildProviderUserContent(message.content, options);
+    inlineImageRequested += converted.requested;
+    inlineImageAttached += converted.attached;
+    warnings.push(...converted.warnings);
+
+    return {
+      role: message.role,
+      content: converted.content,
+      tool_calls: message.tool_calls,
+      tool_call_id: message.tool_call_id,
+      name: message.name,
+    };
+  });
+
+  return {
+    messages: providerMessages,
+    inlineImageRequested,
+    inlineImageAttached,
+    warnings,
+  };
+}
+
 function buildSystemPrompt(containerInput: ContainerInput): string {
   const fragments = [
     [
@@ -1237,6 +1588,20 @@ function buildSystemPrompt(containerInput: ContainerInput): string {
   return fragments.join('\n\n');
 }
 
+function isImageUnsupportedError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  const imageHints = [
+    'image_url',
+    'image input',
+    'multimodal',
+    'vision',
+    'unsupported image',
+    'invalid content type image',
+    'content part type',
+  ];
+  return imageHints.some((hint) => normalized.includes(hint));
+}
+
 async function callChatCompletion(
   providerConfig: ProviderConfig,
   messages: ChatMessage[],
@@ -1251,10 +1616,26 @@ async function callChatCompletion(
     completionTokens?: number;
     totalTokens?: number;
   };
+  inlineImageRequested: number;
+  inlineImageAttached: number;
+  inlineImageWarnings: string[];
 }> {
+  const initialMaterialized = materializeMessagesForProvider(messages, {
+    allowImages: providerConfig.supportsImageInput !== false,
+    disableReason:
+      providerConfig.supportsImageInput === false
+        ? providerConfig.imageSupportReason
+        : undefined,
+  });
+
+  let providerMessages = initialMaterialized.messages;
+  let inlineImageRequested = initialMaterialized.inlineImageRequested;
+  let inlineImageAttached = initialMaterialized.inlineImageAttached;
+  const inlineImageWarnings = [...initialMaterialized.warnings];
+
   const payload: Record<string, unknown> = {
     model: providerConfig.model,
-    messages,
+    messages: providerMessages,
     tools: TOOL_DEFINITIONS,
     tool_choice: 'auto',
     max_tokens: providerConfig.maxTokens,
@@ -1272,19 +1653,46 @@ async function callChatCompletion(
     headers.Authorization = `Bearer ${providerConfig.apiKey}`;
   }
 
-  const response = await fetch(providerConfig.apiUrl, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload),
-  });
+  const sendRequest = async (
+    requestPayload: Record<string, unknown>,
+  ): Promise<{ response: globalThis.Response; raw: string; parsed: ChatCompletionResponse }> => {
+    const response = await fetch(providerConfig.apiUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(requestPayload),
+    });
+    const raw = await response.text();
+    let parsed: ChatCompletionResponse;
+    try {
+      parsed = JSON.parse(raw) as ChatCompletionResponse;
+    } catch (err) {
+      throw new Error(`Provider returned invalid JSON: ${err instanceof Error ? err.message : String(err)}\n${truncate(raw, 1200)}`);
+    }
+    return { response, raw, parsed };
+  };
 
-  const raw = await response.text();
-  let parsed: ChatCompletionResponse;
+  let { response, raw, parsed } = await sendRequest(payload);
+  if (!response.ok) {
+    const providerErrorMessage = parsed.error?.message || raw;
+    if (inlineImageAttached > 0 && isImageUnsupportedError(providerErrorMessage)) {
+      inlineImageWarnings.push(
+        `Provider rejected image input; retried with text-only request (${truncate(providerErrorMessage, 240)}).`,
+      );
+      const fallbackMaterialized = materializeMessagesForProvider(messages, {
+        allowImages: false,
+        disableReason: 'provider rejected image input',
+      });
+      providerMessages = fallbackMaterialized.messages;
+      inlineImageRequested = fallbackMaterialized.inlineImageRequested;
+      inlineImageAttached = fallbackMaterialized.inlineImageAttached;
+      inlineImageWarnings.push(...fallbackMaterialized.warnings);
 
-  try {
-    parsed = JSON.parse(raw) as ChatCompletionResponse;
-  } catch (err) {
-    throw new Error(`Provider returned invalid JSON: ${err instanceof Error ? err.message : String(err)}\n${truncate(raw, 1200)}`);
+      payload.messages = providerMessages;
+      const retry = await sendRequest(payload);
+      response = retry.response;
+      raw = retry.raw;
+      parsed = retry.parsed;
+    }
   }
 
   if (!response.ok) {
@@ -1313,6 +1721,9 @@ async function callChatCompletion(
           totalTokens: parsed.usage.total_tokens,
         }
       : undefined,
+    inlineImageRequested,
+    inlineImageAttached,
+    inlineImageWarnings,
   };
 }
 
@@ -1755,6 +2166,7 @@ async function runQuery(
 ): Promise<{ newSessionId: string; closedDuringQuery: boolean; result: string | null }> {
   const session = sessionId ? loadSession(sessionId) || createSession() : createSession();
   const toolContext = createToolContext(containerInput);
+  let multimodalNoticeSent = false;
   const systemPrompt: ChatMessage = {
     role: 'system',
     content: buildSystemPrompt(containerInput),
@@ -1823,6 +2235,9 @@ async function runQuery(
         completionTokens?: number;
         totalTokens?: number;
       };
+      inlineImageRequested: number;
+      inlineImageAttached: number;
+      inlineImageWarnings: string[];
     };
     try {
       response = await callChatCompletion(
@@ -1852,6 +2267,38 @@ async function runQuery(
       getMessagesTokenCount([systemPrompt, ...trimmedMessages]);
     const totalTokenCount =
       response.usage?.totalTokens ?? promptTokenCount + completionTokenCount;
+
+    if (response.inlineImageWarnings.length > 0) {
+      writeProgress({
+        type: 'lifecycle',
+        stage: 'info',
+        message: 'multimodal_warning',
+        contentPreview: truncate(response.inlineImageWarnings.join(' | '), 1200),
+      }, session.sessionId);
+    }
+
+    const modelLikelyNotSupportingImage =
+      providerConfig.supportsImageInput === false
+      || response.inlineImageWarnings.some((warning) =>
+        /provider rejected image input|not attached \((configured|inferred|unknown)/i.test(warning),
+      );
+
+    if (
+      response.inlineImageRequested > 0
+      && response.inlineImageAttached === 0
+      && modelLikelyNotSupportingImage
+      && !multimodalNoticeSent
+    ) {
+      const reason = providerConfig.supportsImageInput === false
+        ? providerConfig.imageSupportReason
+        : (response.inlineImageWarnings[0] || 'provider does not accept image input for this request');
+      enqueueNoticeMessage(
+        containerInput,
+        `Notice: current model ${providerConfig.model} is not using image input (${reason}). I can still read the saved file paths with tools, or you can switch to a multimodal model.`,
+      );
+      multimodalNoticeSent = true;
+    }
+
     writeProgress({
       type: 'provider',
       stage: 'end',
@@ -1982,6 +2429,13 @@ async function main(): Promise<void> {
 
   try {
     const providerConfig = loadProviderConfig(containerInput);
+    log(
+      `Provider image-input support: ${
+        providerConfig.supportsImageInput === null
+          ? 'unknown'
+          : providerConfig.supportsImageInput ? 'enabled' : 'disabled'
+      } (${providerConfig.imageSupportReason})`,
+    );
     let sessionId = containerInput.sessionId;
 
     while (true) {

@@ -1,8 +1,9 @@
 import fs from 'fs';
+import path from 'node:path';
 
 import type { Client, TextChannel } from 'discord.js';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import { logger } from '../logger.js';
 import { Channel, OnChatMetadata, OnInboundMessage, RegisteredGroup } from '../types.js';
 
@@ -39,6 +40,25 @@ const SESSION_RESET_COMMAND_NAME_SET: Set<string> = new Set(
   SESSION_RESET_SLASH_COMMANDS.map((cmd) => cmd.name),
 );
 
+const DEFAULT_DISCORD_ATTACHMENT_MAX_BYTES = 30 * 1024 * 1024; // 30MB
+const DISCORD_ATTACHMENT_MAX_BYTES = Math.max(
+  1,
+  parseInt(
+    process.env.DISCORD_ATTACHMENT_MAX_BYTES ||
+      `${DEFAULT_DISCORD_ATTACHMENT_MAX_BYTES}`,
+    10,
+  ) || DEFAULT_DISCORD_ATTACHMENT_MAX_BYTES,
+);
+const DEFAULT_DISCORD_ATTACHMENT_TIMEOUT_MS = 15000;
+const DISCORD_ATTACHMENT_TIMEOUT_MS = Math.max(
+  1000,
+  parseInt(
+    process.env.DISCORD_ATTACHMENT_TIMEOUT_MS ||
+      `${DEFAULT_DISCORD_ATTACHMENT_TIMEOUT_MS}`,
+    10,
+  ) || DEFAULT_DISCORD_ATTACHMENT_TIMEOUT_MS,
+);
+
 function enableDiscordGlobalWebSocketPath(): void {
   // @discordjs/ws picks between `ws` and `globalThis.WebSocket` at module
   // initialization time. In Node it defaults to `ws`, which doesn't honor
@@ -63,6 +83,153 @@ export class DiscordChannel implements Channel {
   constructor(botToken: string, opts: DiscordChannelOpts) {
     this.botToken = botToken;
     this.opts = opts;
+  }
+
+  private formatBytes(bytes: number): string {
+    const value = Number(bytes);
+    if (!Number.isFinite(value) || value <= 0) return '0B';
+    if (value < 1024) return `${value}B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)}KB`;
+    return `${(value / (1024 * 1024)).toFixed(1)}MB`;
+  }
+
+  private attachmentKind(contentType: string): string {
+    if (contentType.startsWith('image/')) return 'Image';
+    if (contentType.startsWith('video/')) return 'Video';
+    if (contentType.startsWith('audio/')) return 'Audio';
+    return 'File';
+  }
+
+  private inferExtension(contentType: string): string {
+    const lower = contentType.toLowerCase();
+    if (lower.startsWith('image/')) {
+      if (lower.includes('png')) return '.png';
+      if (lower.includes('jpeg') || lower.includes('jpg')) return '.jpg';
+      if (lower.includes('webp')) return '.webp';
+      if (lower.includes('gif')) return '.gif';
+      if (lower.includes('bmp')) return '.bmp';
+    }
+    if (lower.startsWith('text/csv')) return '.csv';
+    if (lower.startsWith('application/json')) return '.json';
+    if (lower.startsWith('text/plain')) return '.txt';
+    return '';
+  }
+
+  private sanitizeFilename(rawName: string, fallbackBase: string): string {
+    const trimmed = rawName.trim();
+    const extRaw = path.extname(trimmed).slice(0, 16);
+    const ext = extRaw.replace(/[^a-zA-Z0-9.]/g, '');
+    const baseRaw = extRaw ? trimmed.slice(0, -extRaw.length) : trimmed;
+    const base = baseRaw
+      .replace(/[^a-zA-Z0-9._-]+/g, '_')
+      .replace(/^_+/, '')
+      .replace(/_+$/, '')
+      .slice(0, 64);
+    const safeBase = base || fallbackBase;
+    return `${safeBase}${ext}`;
+  }
+
+  private async materializeDiscordAttachments(params: {
+    chatJid: string;
+    groupFolder: string;
+    messageId: string;
+    timestamp: string;
+    attachments: Array<{
+      name?: string | null;
+      size?: number;
+      contentType?: string | null;
+      url?: string;
+      proxyURL?: string;
+    }>;
+  }): Promise<string[]> {
+    const { chatJid, groupFolder, messageId, timestamp, attachments } = params;
+    if (attachments.length === 0) return [];
+
+    const day = timestamp.slice(0, 10) || new Date().toISOString().slice(0, 10);
+    const relativeDir = path.posix.join('inbox', 'discord', day);
+    const absoluteDir = path.join(GROUPS_DIR, groupFolder, ...relativeDir.split('/'));
+    fs.mkdirSync(absoluteDir, { recursive: true });
+
+    const descriptions: string[] = [];
+    let savedCount = 0;
+
+    for (let i = 0; i < attachments.length; i += 1) {
+      const attachment = attachments[i];
+      const contentType = String(attachment.contentType || '').toLowerCase();
+      const kind = this.attachmentKind(contentType);
+      const declaredSize = Number(attachment.size || 0);
+      const sourceUrl = String(attachment.url || attachment.proxyURL || '').trim();
+      const fallbackName = `${kind.toLowerCase()}-${i + 1}${this.inferExtension(contentType)}`;
+      const originalName = (attachment.name || '').trim() || fallbackName;
+      const safeName = this.sanitizeFilename(originalName, `attachment-${i + 1}`);
+      const finalName = `${messageId}-${String(i + 1).padStart(2, '0')}-${safeName}`;
+      const relativePath = path.posix.join(relativeDir, finalName);
+      const absolutePath = path.join(absoluteDir, finalName);
+
+      if (!sourceUrl) {
+        descriptions.push(
+          `[${kind} receive failed] name=${originalName}; error=missing attachment URL`,
+        );
+        continue;
+      }
+
+      if (declaredSize > DISCORD_ATTACHMENT_MAX_BYTES) {
+        descriptions.push(
+          `[${kind}] name=${originalName}; size=${this.formatBytes(declaredSize)}; skipped=too_large(limit=${this.formatBytes(DISCORD_ATTACHMENT_MAX_BYTES)})`,
+        );
+        continue;
+      }
+
+      let timeoutHandle: NodeJS.Timeout | null = null;
+      try {
+        const controller = new AbortController();
+        timeoutHandle = setTimeout(() => {
+          controller.abort();
+        }, DISCORD_ATTACHMENT_TIMEOUT_MS);
+
+        const response = await fetch(sourceUrl, {
+          signal: controller.signal,
+          redirect: 'follow',
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const raw = new Uint8Array(await response.arrayBuffer());
+        if (raw.byteLength > DISCORD_ATTACHMENT_MAX_BYTES) {
+          throw new Error(
+            `attachment exceeds limit ${this.formatBytes(DISCORD_ATTACHMENT_MAX_BYTES)}`,
+          );
+        }
+
+        fs.writeFileSync(absolutePath, raw);
+        savedCount += 1;
+        const effectiveType = contentType || response.headers.get('content-type') || 'unknown';
+        descriptions.push(
+          `[${kind}] name=${originalName}; type=${effectiveType}; size=${this.formatBytes(raw.byteLength)}; saved=/workspace/group/${relativePath}`,
+        );
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        descriptions.push(
+          `[${kind} receive failed] name=${originalName}; error=${errMsg}; url=${sourceUrl.slice(0, 180)}${sourceUrl.length > 180 ? '...' : ''}`,
+        );
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      }
+    }
+
+    logger.info(
+      {
+        chatJid,
+        groupFolder,
+        messageId,
+        attachmentCount: attachments.length,
+        savedCount,
+      },
+      'Processed Discord attachments',
+    );
+    return descriptions;
   }
 
   private ensureRegisteredDiscordGroup(params: {
@@ -253,29 +420,6 @@ export class DiscordChannel implements Channel {
         }
       }
 
-      // Handle attachments — store placeholders so the agent knows something was sent
-      if (message.attachments.size > 0) {
-        const attachmentDescriptions = [...message.attachments.values()].map(
-          (att) => {
-            const contentType = att.contentType || '';
-            if (contentType.startsWith('image/')) {
-              return `[Image: ${att.name || 'image'}]`;
-            } else if (contentType.startsWith('video/')) {
-              return `[Video: ${att.name || 'video'}]`;
-            } else if (contentType.startsWith('audio/')) {
-              return `[Audio: ${att.name || 'audio'}]`;
-            } else {
-              return `[File: ${att.name || 'file'}]`;
-            }
-          },
-        );
-        if (content) {
-          content = `${content}\n${attachmentDescriptions.join('\n')}`;
-        } else {
-          content = attachmentDescriptions.join('\n');
-        }
-      }
-
       // Handle reply context — include who the user is replying to
       if (message.reference?.messageId) {
         try {
@@ -312,6 +456,33 @@ export class DiscordChannel implements Channel {
           'Message from unregistered Discord channel',
         );
         return;
+      }
+
+      if (message.attachments.size > 0) {
+        const attachmentDescriptions = await this.materializeDiscordAttachments({
+          chatJid,
+          groupFolder: group.folder,
+          messageId: msgId,
+          timestamp,
+          attachments: [...message.attachments.values()].map((att) => ({
+            name: att.name,
+            size: att.size,
+            contentType: att.contentType,
+            url: att.url,
+            proxyURL: att.proxyURL,
+          })),
+        });
+        if (attachmentDescriptions.length > 0) {
+          const attachmentBlock = [
+            '[Attachments received; local paths are readable from tools]',
+            ...attachmentDescriptions,
+          ].join('\n');
+          if (content) {
+            content = `${content}\n${attachmentBlock}`;
+          } else {
+            content = attachmentBlock;
+          }
+        }
       }
 
       this.opts.onMessage(chatJid, {
