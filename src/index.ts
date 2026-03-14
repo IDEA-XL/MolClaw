@@ -14,6 +14,7 @@ import {
 import { readEnvFile } from './env.js';
 import { DiscordChannel } from './channels/discord.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
+import { configureGlobalFetchProxy, getConfiguredProxyUrl, maskProxyUrl } from './proxy.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -461,7 +462,39 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  const env = readEnvFile(['DISCORD_BOT_TOKEN', 'WHATSAPP_ENABLED']);
+  const env = readEnvFile([
+    'DISCORD_BOT_TOKEN',
+    'WHATSAPP_ENABLED',
+    'HTTPS_PROXY',
+    'https_proxy',
+    'HTTP_PROXY',
+    'http_proxy',
+    'ALL_PROXY',
+    'all_proxy',
+  ]);
+
+  // Allow putting proxy vars in `.env` (without exporting them in the shell).
+  // `proxy.ts` reads from process.env, and discord.js uses undici which
+  // respects undici's global dispatcher.
+  for (const key of [
+    'HTTPS_PROXY',
+    'https_proxy',
+    'HTTP_PROXY',
+    'http_proxy',
+    'ALL_PROXY',
+    'all_proxy',
+  ] as const) {
+    if (!process.env[key] && env[key]) {
+      process.env[key] = env[key];
+    }
+  }
+
+  const proxyUrl = getConfiguredProxyUrl();
+  if (proxyUrl) {
+    logger.info({ proxy: maskProxyUrl(proxyUrl) }, 'Using proxy for outbound HTTP');
+  }
+  configureGlobalFetchProxy();
+
   const whatsappEnabledRaw =
     process.env.WHATSAPP_ENABLED ?? env.WHATSAPP_ENABLED ?? 'true';
   const whatsappEnabled = whatsappEnabledRaw.toLowerCase() !== 'false';
