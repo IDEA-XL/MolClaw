@@ -1,10 +1,4 @@
-import {
-  Client,
-  Events,
-  GatewayIntentBits,
-  Message,
-  TextChannel,
-} from 'discord.js';
+import type { Client, TextChannel } from 'discord.js';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { logger } from '../logger.js';
@@ -14,6 +8,20 @@ export interface DiscordChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+}
+
+function enableDiscordGlobalWebSocketPath(): void {
+  // @discordjs/ws picks between `ws` and `globalThis.WebSocket` at module
+  // initialization time. In Node it defaults to `ws`, which doesn't honor
+  // undici's global dispatcher proxy setup.
+  //
+  // We set a lightweight compatibility flag before importing discord.js so
+  // @discordjs/ws selects the global WebSocket path instead.
+  const versions = process.versions as Record<string, string | undefined>;
+  if (!versions.bun) {
+    versions.bun = 'proxy-shim';
+    logger.debug('Enabled Discord WebSocket proxy compatibility shim');
+  }
 }
 
 export class DiscordChannel implements Channel {
@@ -29,6 +37,9 @@ export class DiscordChannel implements Channel {
   }
 
   async connect(): Promise<void> {
+    enableDiscordGlobalWebSocketPath();
+    const { Client, Events, GatewayIntentBits } = await import('discord.js');
+
     this.client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
@@ -38,7 +49,7 @@ export class DiscordChannel implements Channel {
       ],
     });
 
-    this.client.on(Events.MessageCreate, async (message: Message) => {
+    this.client.on(Events.MessageCreate, async (message: any) => {
       // Ignore bot messages (including own)
       if (message.author.bot) return;
 
