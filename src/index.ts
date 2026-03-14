@@ -53,7 +53,7 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-let whatsapp: WhatsAppChannel;
+let whatsapp: WhatsAppChannel | null = null;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
@@ -461,19 +461,29 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  // Create WhatsApp channel
-  whatsapp = new WhatsAppChannel({
-    onMessage: (chatJid, msg) => storeMessage(msg),
-    onChatMetadata: (chatJid, timestamp) => storeChatMetadata(chatJid, timestamp),
-    registeredGroups: () => registeredGroups,
-  });
-  channels.push(whatsapp);
+  const env = readEnvFile(['DISCORD_BOT_TOKEN', 'WHATSAPP_ENABLED']);
+  const whatsappEnabledRaw =
+    process.env.WHATSAPP_ENABLED ?? env.WHATSAPP_ENABLED ?? 'true';
+  const whatsappEnabled = whatsappEnabledRaw.toLowerCase() !== 'false';
 
-  // Connect — resolves when first connected
-  await whatsapp.connect();
+  if (whatsappEnabled) {
+    // Create WhatsApp channel
+    whatsapp = new WhatsAppChannel({
+      onMessage: (chatJid, msg) => storeMessage(msg),
+      onChatMetadata: (chatJid, timestamp) =>
+        storeChatMetadata(chatJid, timestamp),
+      registeredGroups: () => registeredGroups,
+    });
+    channels.push(whatsapp);
+
+    // Connect — resolves when first connected
+    await whatsapp.connect();
+    logger.info('WhatsApp channel connected');
+  } else {
+    logger.info('WhatsApp disabled (WHATSAPP_ENABLED=false)');
+  }
 
   // Optional: Discord channel (if configured)
-  const env = readEnvFile(['DISCORD_BOT_TOKEN']);
   const discordToken = process.env.DISCORD_BOT_TOKEN || env.DISCORD_BOT_TOKEN;
   if (discordToken) {
     const discord = new DiscordChannel(discordToken, {
@@ -487,6 +497,13 @@ async function main(): Promise<void> {
     logger.info('Discord channel connected');
   } else {
     logger.info('Discord not configured (DISCORD_BOT_TOKEN missing)');
+  }
+
+  if (channels.length === 0) {
+    logger.fatal(
+      'No channels connected. Set DISCORD_BOT_TOKEN and/or enable WhatsApp.',
+    );
+    process.exit(1);
   }
 
   // Start subsystems (independently of connection handler)
@@ -524,7 +541,16 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) => whatsapp.syncGroupMetadata(force),
+    syncGroupMetadata: async (force) => {
+      if (!whatsapp) {
+        logger.warn(
+          { force },
+          'WhatsApp disabled/unavailable: syncGroupMetadata ignored',
+        );
+        return;
+      }
+      await whatsapp.syncGroupMetadata(force);
+    },
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
   });
