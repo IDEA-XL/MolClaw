@@ -15,11 +15,19 @@ This fork focuses on practical local deployment with an OpenAI-compatible provid
 - Real-time dashboard:
   - Provider/tool/final-output timeline
   - Round-level aggregation (OpenAI/Gemini-like view)
+  - Session-aware filtering (`latest` / `all` / specific session)
+  - Session selector defaults to recent 20 sessions with on-demand expand
+  - Right-panel round table with one-click jump to timeline round
+  - Tree-style workspace file browser (expand/collapse, double-click enter, file preview)
+  - Fold-state persistence while new events stream in
   - Context/token usage snapshot
   - Streaming updates via SSE
 - Session controls:
   - Reset session from dashboard
   - Reset session from Discord slash commands: `/newsession`, `/reset_session`, `/reset`
+- Output delivery:
+  - Discord text replies
+  - Discord image file send support (`sendImage`)
 - Robust operations:
   - Startup logs include dashboard URL
   - Cleaner shutdown for dashboard/stream resources
@@ -106,6 +114,11 @@ Note: your bot invite must include `applications.commands` scope for slash comma
 - Open the printed URL from startup logs.
 - Use `New Session` button to reset the current chat session.
 - Timeline supports grouped rounds and expandable tool call/result details.
+- Use the session selector to focus `latest`, `all`, or specific sessions.
+- Right panel includes:
+  - Recent rounds table with jump-to-round buttons
+  - Latest model/context/token snapshot
+  - Workspace tree browser for the selected group
 
 ## Documentation
 

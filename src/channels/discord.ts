@@ -1,3 +1,5 @@
+import fs from 'fs';
+
 import type { Client, TextChannel } from 'discord.js';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
@@ -392,6 +394,47 @@ export class DiscordChannel implements Channel {
       logger.info({ jid, length: text.length }, 'Discord message sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
+    }
+  }
+
+  async sendImage(jid: string, imagePath: string, caption?: string): Promise<void> {
+    if (!this.client || !this.client.isReady()) {
+      logger.warn({ jid }, 'Discord client not ready, image not sent');
+      return;
+    }
+
+    if (!fs.existsSync(imagePath)) {
+      logger.warn({ jid, imagePath }, 'Image file does not exist, skipping send');
+      return;
+    }
+
+    try {
+      const channelId = jid.replace(/^dc:/, '');
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased() || !('send' in channel)) {
+        logger.warn({ jid }, 'Discord channel not found or not text-based for image');
+        return;
+      }
+
+      const textChannel = channel as unknown as {
+        send: (content: {
+          content?: string;
+          files: string[];
+        }) => Promise<unknown>;
+      };
+
+      const MAX_CAPTION = 2000;
+      const safeCaption = caption && caption.length > MAX_CAPTION
+        ? `${caption.slice(0, MAX_CAPTION - 3)}...`
+        : caption;
+
+      await textChannel.send({
+        content: safeCaption,
+        files: [imagePath],
+      });
+      logger.info({ jid, imagePath, hasCaption: !!safeCaption }, 'Discord image sent');
+    } catch (err) {
+      logger.error({ jid, imagePath, err }, 'Failed to send Discord image');
     }
   }
 

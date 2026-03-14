@@ -1,4 +1,6 @@
+import fs from 'node:fs';
 import http from 'node:http';
+import path from 'node:path';
 import type { Socket } from 'node:net';
 import { URL } from 'node:url';
 
@@ -95,6 +97,34 @@ function checkAuth(req: http.IncomingMessage, token?: string): boolean {
   return reqUrl.searchParams.get('token') === token;
 }
 
+function resolveGroupWorkspace(chatJid: string): { groupFolder: string; baseDir: string } {
+  const registered = getAllRegisteredGroups();
+  const group = registered[chatJid];
+  if (!group) {
+    throw new Error('chat_jid is not registered');
+  }
+  return {
+    groupFolder: group.folder,
+    baseDir: path.resolve(process.cwd(), 'groups', group.folder),
+  };
+}
+
+function resolveWorkspacePath(baseDir: string, requestedPath: string | null): { absPath: string; relPath: string } {
+  const raw = (requestedPath || '').trim();
+  const sanitized = raw.replace(/\\/g, '/').replace(/^\/+/, '');
+  const absPath = path.resolve(baseDir, sanitized || '.');
+  const withinBase = absPath === baseDir || absPath.startsWith(`${baseDir}${path.sep}`);
+  if (!withinBase) {
+    throw new Error('path escapes group workspace');
+  }
+  const relPath = path.relative(baseDir, absPath).replace(/\\/g, '/');
+  return { absPath, relPath: relPath === '.' ? '' : relPath };
+}
+
+function isProbablyText(content: Buffer): boolean {
+  return !content.includes(0);
+}
+
 function getDashboardHtml(): string {
   return `<!doctype html>
 <html lang="en">
@@ -171,7 +201,7 @@ function getDashboardHtml(): string {
     }
     .toolbar {
       display: grid;
-      grid-template-columns: 1fr auto auto auto;
+      grid-template-columns: 1fr auto auto auto auto auto;
       gap: 6px;
       padding: 8px;
       border-bottom: 1px solid #edf2f8;
@@ -271,6 +301,9 @@ function getDashboardHtml(): string {
       border-color: #b8c9e8;
       background: #f8fbff;
       max-width: min(780px, 96%);
+    }
+    .msg.round.round-focus {
+      box-shadow: 0 0 0 2px #6aa0ff inset, 0 2px 12px rgba(23, 92, 211, 0.18);
     }
     .msg.tool-call,
     .msg.tool-result {
@@ -460,6 +493,100 @@ function getDashboardHtml(): string {
       padding: 4px 3px;
       vertical-align: top;
     }
+    .round-jump {
+      border: 1px solid #bdd2f2;
+      background: #eef5ff;
+      color: #184f9d;
+      border-radius: 6px;
+      padding: 2px 7px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .round-jump:hover {
+      background: #e4efff;
+    }
+    .file-path {
+      font-size: 11px;
+      color: #456084;
+      margin-bottom: 6px;
+      word-break: break-all;
+    }
+    .file-actions {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .file-list {
+      border: 1px solid #dbe5f3;
+      border-radius: 8px;
+      background: #fff;
+      max-height: 240px;
+      overflow: auto;
+      margin-bottom: 8px;
+    }
+    .file-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 6px;
+      width: 100%;
+      border: 0;
+      border-bottom: 1px solid #edf2f8;
+      background: #fff;
+      padding: 6px 8px;
+      text-align: left;
+      cursor: pointer;
+      font-size: 12px;
+      color: #2b4567;
+    }
+    .file-row:last-child {
+      border-bottom: 0;
+    }
+    .file-row:hover {
+      background: #f7faff;
+    }
+    .file-row.selected {
+      background: #eaf2ff;
+      border-left: 3px solid #5d8fe4;
+      padding-left: 5px;
+    }
+    .file-tree-prefix {
+      font-size: 11px;
+      color: #5b7393;
+      width: 14px;
+      display: inline-block;
+      text-align: center;
+      flex: 0 0 14px;
+    }
+    .file-tree-indent {
+      display: inline-block;
+      width: 12px;
+      flex: 0 0 12px;
+    }
+    .file-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+    .file-meta {
+      font-size: 10px;
+      color: #6a7f99;
+      white-space: nowrap;
+    }
+    .file-preview {
+      border: 1px solid #dbe5f3;
+      border-radius: 8px;
+      background: #f8fbff;
+      padding: 6px;
+    }
+    .file-preview-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: #34547b;
+      margin-bottom: 4px;
+      word-break: break-all;
+    }
     .empty {
       padding: 12px;
       color: var(--muted);
@@ -494,6 +621,8 @@ function getDashboardHtml(): string {
       <div class="title">Conversation <span class="muted" id="timeline-count"></span></div>
       <div class="toolbar">
         <input id="timeline-search" placeholder="Filter text (tool/model/error)..." />
+        <select id="session-filter" title="Filter by session"></select>
+        <button id="session-more-btn">More</button>
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#475467;padding:0 4px;">
           <input type="checkbox" id="show-ops" /> show ops
         </label>
@@ -519,6 +648,22 @@ function getDashboardHtml(): string {
     let allEvents = [];
     let allMessages = [];
     let allGroups = [];
+    let currentSessionFilter = '__latest__';
+    let sessionFilterInitialized = false;
+    let showAllSessionOptions = false;
+    let roundFocusTimer = null;
+    let fileBrowserPath = '';
+    let fileBrowserEntries = [];
+    let fileBrowserError = '';
+    let fileBrowserLoading = false;
+    let fileTreeEntries = new Map();
+    let fileTreeExpanded = new Set();
+    let fileTreeLoading = new Set();
+    let fileTreeSelected = '';
+    let filePreviewPath = '';
+    let filePreviewContent = '';
+    let filePreviewError = '';
+    let filePreviewLoading = false;
     let queueSnapshotByGroup = new Map();
     const token = new URLSearchParams(location.search).get('token');
 
@@ -536,6 +681,8 @@ function getDashboardHtml(): string {
 
     const groupSearchEl = document.getElementById('group-search');
     const timelineSearchEl = document.getElementById('timeline-search');
+    const sessionFilterEl = document.getElementById('session-filter');
+    const sessionMoreBtnEl = document.getElementById('session-more-btn');
     const showOpsEl = document.getElementById('show-ops');
     const newSessionBtnEl = document.getElementById('new-session-btn');
     const pauseBtnEl = document.getElementById('pause-btn');
@@ -557,6 +704,331 @@ function getDashboardHtml(): string {
 
     function getEventPayload(e) {
       return e && e.payload ? e.payload : {};
+    }
+
+    function getEventSessionId(e) {
+      if (!e || typeof e.sessionId !== 'string') return '';
+      return e.sessionId.trim();
+    }
+
+    function getSessionSummaries(events) {
+      const bySession = new Map();
+      for (const e of events) {
+        const sessionId = getEventSessionId(e);
+        if (!sessionId) continue;
+        const existing = bySession.get(sessionId) || {
+          id: sessionId,
+          firstTs: e.ts,
+          lastTs: e.ts,
+          count: 0,
+        };
+        existing.count += 1;
+        if (e.ts < existing.firstTs) existing.firstTs = e.ts;
+        if (e.ts > existing.lastTs) existing.lastTs = e.ts;
+        bySession.set(sessionId, existing);
+      }
+      return Array.from(bySession.values())
+        .sort((a, b) => (a.lastTs < b.lastTs ? 1 : a.lastTs > b.lastTs ? -1 : 0));
+    }
+
+    function getLatestSessionIdFromEvents(events) {
+      const summaries = getSessionSummaries(events);
+      return summaries.length > 0 ? summaries[0].id : '';
+    }
+
+    function getEffectiveSessionFilter() {
+      if (currentSessionFilter === '__all__') {
+        return '__all__';
+      }
+      if (currentSessionFilter === '__latest__') {
+        const latest = getLatestSessionIdFromEvents(allEvents);
+        return latest || '__all__';
+      }
+      return currentSessionFilter;
+    }
+
+    function sessionLabel(sessionId) {
+      if (!sessionId) return 'unknown';
+      if (sessionId.length <= 18) return sessionId;
+      return sessionId.slice(0, 8) + '...' + sessionId.slice(-8);
+    }
+
+    function refreshSessionFilterOptions() {
+      const summaries = getSessionSummaries(allEvents);
+      const existing = new Set(summaries.map((s) => s.id));
+
+      if (!sessionFilterInitialized) {
+        currentSessionFilter = '__latest__';
+        sessionFilterInitialized = true;
+      } else if (
+        currentSessionFilter !== '__all__'
+        && currentSessionFilter !== '__latest__'
+        && !existing.has(currentSessionFilter)
+      ) {
+        currentSessionFilter = '__latest__';
+      }
+
+      const MAX_VISIBLE_SESSIONS = 20;
+      let visibleSummaries = showAllSessionOptions
+        ? summaries
+        : summaries.slice(0, MAX_VISIBLE_SESSIONS);
+      if (
+        currentSessionFilter !== '__all__'
+        && currentSessionFilter !== '__latest__'
+        && summaries.some((s) => s.id === currentSessionFilter)
+        && !visibleSummaries.some((s) => s.id === currentSessionFilter)
+      ) {
+        const selected = summaries.find((s) => s.id === currentSessionFilter);
+        if (selected) {
+          visibleSummaries = [selected, ...visibleSummaries];
+        }
+      }
+
+      let html = '<option value=\"__latest__\">latest session</option>';
+      html += '<option value=\"__all__\">all sessions</option>';
+      html += visibleSummaries.map((s) => {
+        const selected = s.id === currentSessionFilter ? ' selected' : '';
+        return '<option value=\"' + esc(s.id) + '\"' + selected + '>'
+          + esc(sessionLabel(s.id) + ' · events=' + s.count)
+          + '</option>';
+      }).join('');
+      sessionFilterEl.innerHTML = html;
+      sessionFilterEl.value = currentSessionFilter;
+
+      if (summaries.length > MAX_VISIBLE_SESSIONS) {
+        sessionMoreBtnEl.disabled = false;
+        sessionMoreBtnEl.textContent = showAllSessionOptions
+          ? 'Recent 20'
+          : 'More (' + (summaries.length - MAX_VISIBLE_SESSIONS) + ')';
+      } else {
+        sessionMoreBtnEl.disabled = true;
+        sessionMoreBtnEl.textContent = 'More';
+      }
+    }
+
+    function getFilteredEvents() {
+      const effective = getEffectiveSessionFilter();
+      if (effective === '__all__') {
+        return allEvents;
+      }
+      return allEvents.filter((e) => getEventSessionId(e) === effective);
+    }
+
+    function getSessionMessageRangeMs(sessionId) {
+      const events = allEvents.filter((e) => getEventSessionId(e) === sessionId);
+      if (!events.length) return null;
+      let minMs = Infinity;
+      let maxMs = -Infinity;
+      for (const e of events) {
+        const t = Date.parse(e.ts);
+        if (!Number.isFinite(t)) continue;
+        if (t < minMs) minMs = t;
+        if (t > maxMs) maxMs = t;
+      }
+      if (!Number.isFinite(minMs) || !Number.isFinite(maxMs)) return null;
+      // Include nearby user messages around the session event window.
+      return {
+        minMs: minMs - 5 * 60 * 1000,
+        maxMs: maxMs + 60 * 1000,
+      };
+    }
+
+    function getFilteredMessages() {
+      const effective = getEffectiveSessionFilter();
+      if (effective === '__all__') {
+        return allMessages;
+      }
+      const range = getSessionMessageRangeMs(effective);
+      if (!range) return [];
+      return allMessages.filter((m) => {
+        const t = Date.parse(m.timestamp);
+        if (!Number.isFinite(t)) return false;
+        return t >= range.minMs && t <= range.maxMs;
+      });
+    }
+
+    function updateSelectedBadge() {
+      const effective = getEffectiveSessionFilter();
+      const sessionPart = currentSessionFilter === '__all__'
+        ? 'all sessions'
+        : currentSessionFilter === '__latest__'
+          ? ('latest(' + (effective === '__all__' ? 'n/a' : sessionLabel(effective)) + ')')
+          : sessionLabel(currentSessionFilter);
+      selectedEl.textContent = 'chat: ' + (currentChat || 'none') + ' · session: ' + sessionPart;
+    }
+
+    function formatBytes(n) {
+      const value = Number(n);
+      if (!Number.isFinite(value) || value < 0) return '-';
+      if (value < 1024) return value + 'B';
+      if (value < 1024 * 1024) return (value / 1024).toFixed(1) + 'KB';
+      return (value / (1024 * 1024)).toFixed(1) + 'MB';
+    }
+
+    async function loadFileBrowser(targetPath) {
+      if (!currentChat) return;
+      fileBrowserLoading = true;
+      fileBrowserError = '';
+      renderContextPanel();
+      try {
+        const data = await fetchJson(
+          '/api/files/list?chat_jid=' + encodeURIComponent(currentChat)
+          + '&path=' + encodeURIComponent(targetPath || ''),
+        );
+        fileBrowserPath = data.currentPath || '';
+        fileBrowserEntries = Array.isArray(data.entries) ? data.entries : [];
+        fileTreeEntries = new Map();
+        fileTreeEntries.set(fileBrowserPath, fileBrowserEntries);
+        fileTreeExpanded = new Set([fileBrowserPath]);
+        fileTreeLoading = new Set();
+        fileTreeSelected = '';
+        filePreviewPath = '';
+        filePreviewContent = '';
+        filePreviewError = '';
+      } catch (err) {
+        fileBrowserError = err instanceof Error ? err.message : String(err);
+      } finally {
+        fileBrowserLoading = false;
+        renderContextPanel();
+      }
+    }
+
+    async function loadFileTreeNode(targetPath) {
+      if (!currentChat || !targetPath) return;
+      fileTreeLoading.add(targetPath);
+      renderContextPanel();
+      try {
+        const data = await fetchJson(
+          '/api/files/list?chat_jid=' + encodeURIComponent(currentChat)
+          + '&path=' + encodeURIComponent(targetPath),
+        );
+        fileTreeEntries.set(targetPath, Array.isArray(data.entries) ? data.entries : []);
+      } catch {
+        // keep silent in tree node loading; user can still navigate by entering dir
+      } finally {
+        fileTreeLoading.delete(targetPath);
+        renderContextPanel();
+      }
+    }
+
+    function toggleTreeDir(targetPath) {
+      if (!targetPath) return;
+      if (fileTreeExpanded.has(targetPath)) {
+        fileTreeExpanded.delete(targetPath);
+        renderContextPanel();
+        return;
+      }
+      fileTreeExpanded.add(targetPath);
+      if (!fileTreeEntries.has(targetPath)) {
+        loadFileTreeNode(targetPath).catch(() => {});
+      } else {
+        renderContextPanel();
+      }
+    }
+
+    async function loadFilePreview(targetPath) {
+      if (!currentChat) return;
+      filePreviewLoading = true;
+      filePreviewError = '';
+      filePreviewPath = targetPath || '';
+      renderContextPanel();
+      try {
+        const data = await fetchJson(
+          '/api/files/read?chat_jid=' + encodeURIComponent(currentChat)
+          + '&path=' + encodeURIComponent(targetPath || ''),
+        );
+        filePreviewPath = data.path || targetPath || '';
+        filePreviewContent = data.content || '';
+      } catch (err) {
+        filePreviewError = err instanceof Error ? err.message : String(err);
+        filePreviewContent = '';
+      } finally {
+        filePreviewLoading = false;
+        renderContextPanel();
+      }
+    }
+
+    function renderFileTreeRows(parentPath, depth) {
+      const entries = fileTreeEntries.get(parentPath) || [];
+      if (!entries.length) {
+        return depth === 0
+          ? '<div class=\"empty\">No entries</div>'
+          : '';
+      }
+
+      let html = '';
+      for (const entry of entries) {
+        const isDir = entry.type === 'dir';
+        const targetPath = parentPath
+          ? (parentPath + '/' + entry.name)
+          : entry.name;
+        const isExpanded = isDir && fileTreeExpanded.has(targetPath);
+        const isSelected = fileTreeSelected === targetPath;
+        const prefix = isDir ? (isExpanded ? '▾' : '▸') : '·';
+        const meta = isDir ? 'folder' : formatBytes(entry.size);
+
+        html += '<button class=\"file-row' + (isSelected ? ' selected' : '') + '\"'
+          + ' data-file-path=\"' + esc(targetPath) + '\"'
+          + ' data-file-kind=\"' + esc(entry.type || '') + '\">';
+        for (let i = 0; i < depth; i += 1) {
+          html += '<span class=\"file-tree-indent\"></span>';
+        }
+        html += '<span class=\"file-tree-prefix\">' + esc(prefix) + '</span>'
+          + '<span class=\"file-name\">' + esc(entry.name) + '</span>'
+          + '<span class=\"file-meta\">' + esc(meta) + '</span>'
+          + '</button>';
+
+        if (isDir && isExpanded) {
+          if (fileTreeLoading.has(targetPath)) {
+            html += '<div class=\"empty\">Loading ' + esc(entry.name) + '...</div>';
+          } else {
+            html += renderFileTreeRows(targetPath, depth + 1);
+          }
+        }
+      }
+      return html;
+    }
+
+    function renderFileBrowserCard() {
+      const pathText = fileBrowserPath ? ('/workspace/group/' + fileBrowserPath) : '/workspace/group';
+      const parentPath = fileBrowserPath
+        ? fileBrowserPath.split('/').slice(0, -1).join('/')
+        : '';
+
+      let listHtml = '<div class=\"empty\">No entries</div>';
+      if (fileBrowserLoading) {
+        listHtml = '<div class=\"empty\">Loading files...</div>';
+      } else if (fileBrowserError) {
+        listHtml = '<div class=\"empty error-text\">' + esc(fileBrowserError) + '</div>';
+      } else {
+        listHtml = renderFileTreeRows(fileBrowserPath, 0);
+      }
+
+      const previewHtml = filePreviewPath
+        ? (filePreviewLoading
+          ? '<div class=\"file-preview\"><div class=\"empty\">Loading preview...</div></div>'
+          : filePreviewError
+            ? '<div class=\"file-preview\"><div class=\"empty error-text\">'
+              + esc(filePreviewError)
+              + '</div></div>'
+            : '<div class=\"file-preview\">'
+              + '<div class=\"file-preview-title\">' + esc('/workspace/group/' + filePreviewPath) + '</div>'
+              + renderCodeBlock(filePreviewContent || '(empty file)', 'text preview')
+              + '</div>')
+        : '<div class=\"empty\">Click a file to preview text content</div>';
+
+      return ''
+        + '<div class=\"card\">'
+        + '  <p class=\"card-title\">Workspace Browser</p>'
+        + '  <div class=\"file-path\">' + esc(pathText) + '</div>'
+        + '  <div class=\"file-actions\">'
+        + '    <button data-file-action=\"refresh\">Refresh Tree</button>'
+        + '    <button data-file-action=\"up\"' + (fileBrowserPath ? '' : ' disabled') + '>Up</button>'
+        + '    <button data-file-action=\"root\">Root</button>'
+        + '  </div>'
+        + '  <div class=\"file-list\">' + listHtml + '</div>'
+        + previewHtml
+        + '</div>';
     }
 
     function isNearBottom(el) {
@@ -722,18 +1194,22 @@ function getDashboardHtml(): string {
       return html || '<div class=\"msg-body\">' + esc(raw || '(empty)') + '</div>';
     }
 
-    function renderToolCallBody(payload, fallbackText) {
+    function renderFoldSummary(summary, innerHtml, foldKey) {
+      const keyAttr = foldKey ? (' data-fold-key=\"' + esc(foldKey) + '\"') : '';
+      return '<details class=\"fold\"' + keyAttr + '><summary>' + esc(summary) + '</summary>' + innerHtml + '</details>';
+    }
+
+    function renderToolCallBody(payload, fallbackText, foldKeyPrefix) {
       const args = payload && payload.toolArgs && typeof payload.toolArgs === 'object'
         ? payload.toolArgs
         : parseMaybeJson(payload && payload.argsSummary);
+      const keyPrefix = foldKeyPrefix || 'tool';
       if (!args || typeof args !== 'object' || Array.isArray(args)) {
         const text = fallbackText || payload.argsSummary || '';
         const firstLine = text.split('\\n').find((line) => line.trim()) || '(empty args)';
         return ''
           + '<div class=\"msg-body\">' + esc(firstLine.length > 220 ? firstLine.slice(0, 220) + '...' : firstLine) + '</div>'
-          + '<details class=\"fold\"><summary>view full tool args</summary>'
-          + renderTextWithCodeBlocks(text)
-          + '</details>';
+          + renderFoldSummary('view full tool args', renderTextWithCodeBlocks(text), keyPrefix + ':tool-args');
       }
 
       const rows = Object.entries(args);
@@ -764,23 +1240,20 @@ function getDashboardHtml(): string {
       }).join('');
       return ''
         + '<div class=\"msg-body\">' + esc(summary || '(args)') + '</div>'
-        + '<details class=\"fold\"><summary>view full tool args</summary>'
-        + '<div class=\"kv-list\">' + htmlRows + '</div>'
-        + '</details>';
+        + renderFoldSummary('view full tool args', '<div class=\"kv-list\">' + htmlRows + '</div>', keyPrefix + ':tool-args');
     }
 
-    function renderToolResultBody(payload, fallbackText) {
+    function renderToolResultBody(payload, fallbackText, foldKeyPrefix) {
       const text = extractToolOutput(payload);
       const resolved = text || fallbackText || '';
       const summarySource = resolved.split('\\n').find((line) => line.trim()) || '(empty output)';
       const summary = summarySource.length > 240
         ? summarySource.slice(0, 240) + '...'
         : summarySource;
+      const keyPrefix = foldKeyPrefix || 'tool';
       return ''
         + '<div class=\"msg-body\">' + esc(summary) + '</div>'
-        + '<details class=\"fold\"><summary>view full tool output</summary>'
-        + renderTextWithCodeBlocks(resolved)
-        + '</details>';
+        + renderFoldSummary('view full tool output', renderTextWithCodeBlocks(resolved), keyPrefix + ':tool-output');
     }
 
     function providerVisibleText(payload) {
@@ -815,7 +1288,7 @@ function getDashboardHtml(): string {
       return Math.trunc(n);
     }
 
-    function buildRoundBody(payload) {
+    function buildRoundBody(payload, foldKeyPrefix) {
       const provider = payload.provider || {};
       const context = payload.context || {};
       const toolStarts = Array.isArray(payload.toolStarts) ? payload.toolStarts : [];
@@ -836,7 +1309,11 @@ function getDashboardHtml(): string {
         + (providerView.note ? '<div class=\"msg-body muted\">' + esc(providerView.note) + '</div>' : '')
         + (providerView.text ? renderTextWithCodeBlocks(providerView.text) : '')
         + (providerView.reasoning
-          ? '<details class=\"fold\"><summary>reasoning / analysis</summary>' + renderTextWithCodeBlocks(providerView.reasoning) + '</details>'
+          ? renderFoldSummary(
+            'reasoning / analysis',
+            renderTextWithCodeBlocks(providerView.reasoning),
+            (foldKeyPrefix || 'round') + ':provider-reasoning',
+          )
           : '')
         + '</div>';
 
@@ -886,9 +1363,15 @@ function getDashboardHtml(): string {
             return ''
               + '<div class=\"round-step\">'
               + '  <div class=\"round-step-title\">' + esc(title + ': ' + toolName) + '</div>'
-              + (step.start ? renderToolCallBody(startPayload, startPayload.argsSummary || '') : '<div class=\"msg-body muted\">tool call event missing</div>')
+              + (step.start
+                ? renderToolCallBody(startPayload, startPayload.argsSummary || '', (foldKeyPrefix || 'round') + ':tool-' + idx)
+                : '<div class=\"msg-body muted\">tool call event missing</div>')
               + (step.result
-                ? '<details class=\"fold\"><summary>' + esc((resultStage === 'error' ? 'error' : 'result') + ' output') + '</summary>' + renderToolResultBody(resultPayload, '') + '</details>'
+                ? renderFoldSummary(
+                  (resultStage === 'error' ? 'error' : 'result') + ' output',
+                  renderToolResultBody(resultPayload, '', (foldKeyPrefix || 'round') + ':tool-' + idx + ':result'),
+                  (foldKeyPrefix || 'round') + ':tool-' + idx + ':result-wrap',
+                )
                 : '<div class=\"msg-body muted\">tool result not received</div>')
               + '</div>';
           }).join('')
@@ -905,28 +1388,32 @@ function getDashboardHtml(): string {
 
       return ''
         + '<div class=\"round-summary\"><div class=\"msg-body\">' + esc(roundSummary) + '</div></div>'
-        + '<details class=\"fold\"><summary>expand round details</summary>'
-        + providerHtml
-        + toolHtml
-        + '</details>';
+        + renderFoldSummary(
+          'expand round details',
+          providerHtml + toolHtml,
+          (foldKeyPrefix || 'round') + ':expand',
+        );
     }
 
     function renderItemBody(item) {
       if (item.kind === 'round') {
-        return buildRoundBody(item.payload || {});
+        return buildRoundBody(item.payload || {}, item.key || 'round');
       }
       if (item.kind === 'tool-call') {
-        return renderToolCallBody(item.payload || {}, item.body || '');
+        return renderToolCallBody(item.payload || {}, item.body || '', item.key || 'tool-call');
       }
       if (item.kind === 'tool-result' || item.kind === 'error') {
-        return renderToolResultBody(item.payload || {}, item.body || '');
+        return renderToolResultBody(item.payload || {}, item.body || '', item.key || item.kind);
       }
       return renderTextWithCodeBlocks(item.body || '');
     }
 
     function buildTimelineItems() {
       const items = [];
-      for (const m of allMessages) {
+      const events = getFilteredEvents();
+      const messages = getFilteredMessages();
+
+      for (const m of messages) {
         items.push({
           key: 'm-' + m.id,
           ts: m.timestamp,
@@ -941,7 +1428,7 @@ function getDashboardHtml(): string {
       let globalQueryIndex = 0;
       const queryKeyByEventId = new Map();
 
-      for (const e of allEvents) {
+      for (const e of events) {
         const p = getEventPayload(e);
         const sessionId = (typeof e.sessionId === 'string' && e.sessionId.trim())
           ? e.sessionId.trim()
@@ -963,7 +1450,7 @@ function getDashboardHtml(): string {
       }
 
       const roundBuckets = new Map();
-      for (const e of allEvents) {
+      for (const e of events) {
         const p = getEventPayload(e);
         const round = normalizeRound(p.round);
         const isRoundEvent = round != null && (
@@ -1045,20 +1532,24 @@ function getDashboardHtml(): string {
 
       const roundItems = Array.from(roundBuckets.values())
         .sort((a, b) => (a.tsStart < b.tsStart ? -1 : a.tsStart > b.tsStart ? 1 : 0))
-        .map((roundEvent) => ({
-          key: 'r-' + roundEvent.key,
-          ts: roundEvent.tsStart,
-          kind: 'round',
-          role: 'round ' + roundEvent.round,
-          meta: [
-            roundEvent.provider && roundEvent.provider.durationMs != null
-              ? ('durationMs=' + roundEvent.provider.durationMs)
-              : '',
-            roundEvent.provider ? summarizeTokens(roundEvent.provider) : '',
-          ].filter(Boolean).join(' · '),
-          body: '',
-          payload: roundEvent,
-        }));
+        .map((roundEvent) => {
+          const anchorId = 'round-' + String(roundEvent.key).replace(/[^a-zA-Z0-9_-]/g, '_');
+          return {
+            key: 'r-' + roundEvent.key,
+            ts: roundEvent.tsStart,
+            kind: 'round',
+            role: 'round ' + roundEvent.round,
+            meta: [
+              roundEvent.provider && roundEvent.provider.durationMs != null
+                ? ('durationMs=' + roundEvent.provider.durationMs)
+                : '',
+              roundEvent.provider ? summarizeTokens(roundEvent.provider) : '',
+            ].filter(Boolean).join(' · '),
+            body: '',
+            anchorId,
+            payload: { ...roundEvent, anchorId },
+          };
+        });
 
       items.push(...roundItems);
       items.sort(compareByTs);
@@ -1067,6 +1558,11 @@ function getDashboardHtml(): string {
 
     function renderTimeline() {
       const shouldStick = isNearBottom(timelineWrapEl);
+      const openFoldKeys = new Set(
+        Array.from(timelineEl.querySelectorAll('details.fold[open][data-fold-key]'))
+          .map((el) => el.getAttribute('data-fold-key'))
+          .filter(Boolean),
+      );
       const keyword = timelineSearchEl.value.trim().toLowerCase();
       const items = buildTimelineItems().filter((item) => {
         if (!keyword) return true;
@@ -1085,6 +1581,9 @@ function getDashboardHtml(): string {
       for (const item of items) {
         const li = document.createElement('li');
         li.className = 'msg ' + item.kind;
+        if (item.kind === 'round' && item.anchorId) {
+          li.id = item.anchorId;
+        }
         li.innerHTML = ''
           + '<div class="msg-head">'
           + '  <span class="msg-role">' + esc(item.role) + '</span>'
@@ -1095,30 +1594,60 @@ function getDashboardHtml(): string {
         timelineEl.appendChild(li);
       }
 
+      if (openFoldKeys.size > 0) {
+        for (const el of timelineEl.querySelectorAll('details.fold[data-fold-key]')) {
+          const key = el.getAttribute('data-fold-key');
+          if (key && openFoldKeys.has(key)) {
+            el.open = true;
+          }
+        }
+      }
+
       if (shouldStick) {
         scrollToBottom(true);
       }
     }
 
+    function jumpToRound(anchorId) {
+      if (!anchorId) return;
+      const target = document.getElementById(anchorId);
+      if (!target) {
+        setStreamStatus('round not found in current session filter');
+        return;
+      }
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.classList.add('round-focus');
+      if (roundFocusTimer) {
+        clearTimeout(roundFocusTimer);
+      }
+      roundFocusTimer = setTimeout(() => {
+        target.classList.remove('round-focus');
+        roundFocusTimer = null;
+      }, 1500);
+    }
+
     function getLatestContextEvent() {
-      for (let i = allEvents.length - 1; i >= 0; i -= 1) {
-        const e = allEvents[i];
+      const events = getFilteredEvents();
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const e = events[i];
         if (e.eventType === 'context' && e.payload) return e;
       }
       return null;
     }
 
     function getLatestProviderEvent() {
-      for (let i = allEvents.length - 1; i >= 0; i -= 1) {
-        const e = allEvents[i];
+      const events = getFilteredEvents();
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const e = events[i];
         if (e.eventType === 'provider' && e.stage === 'end') return e;
       }
       return null;
     }
 
     function getLatestModelVersion() {
-      for (let i = allEvents.length - 1; i >= 0; i -= 1) {
-        const e = allEvents[i];
+      const events = getFilteredEvents();
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const e = events[i];
         const p = getEventPayload(e);
         if (typeof p.model === 'string' && p.model.trim()) return p.model.trim();
       }
@@ -1126,8 +1655,16 @@ function getDashboardHtml(): string {
     }
 
     function getLatestSessionId() {
-      for (let i = allEvents.length - 1; i >= 0; i -= 1) {
-        const e = allEvents[i];
+      if (currentSessionFilter === '__latest__') {
+        const effective = getEffectiveSessionFilter();
+        return effective === '__all__' ? 'n/a' : effective;
+      }
+      if (currentSessionFilter !== '__all__') {
+        return currentSessionFilter || 'n/a';
+      }
+      const events = getFilteredEvents();
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const e = events[i];
         if (typeof e.sessionId === 'string' && e.sessionId.trim()) {
           return e.sessionId.trim();
         }
@@ -1136,27 +1673,54 @@ function getDashboardHtml(): string {
     }
 
     function buildRoundRows() {
-      const contexts = allEvents.filter((e) => e.eventType === 'context' && e.payload);
-      const providers = allEvents.filter((e) => e.eventType === 'provider' && e.stage === 'end' && e.payload);
-      const byRound = new Map();
+      const events = getFilteredEvents();
+      const sessionQueryIndex = new Map();
+      let globalQueryIndex = 0;
+      const queryKeyByEventId = new Map();
 
-      for (const e of contexts) {
+      for (const e of events) {
         const p = getEventPayload(e);
-        if (p.round == null) continue;
-        byRound.set(Number(p.round), { round: Number(p.round), context: p, provider: null });
+        const sessionId = getEventSessionId(e) || '__no_session__';
+        if (e.eventType === 'lifecycle' && p.message === 'query_started') {
+          const next = (sessionQueryIndex.get(sessionId) || 0) + 1;
+          sessionQueryIndex.set(sessionId, next);
+          globalQueryIndex += 1;
+          queryKeyByEventId.set(e.id, sessionId + ':q' + next + ':g' + globalQueryIndex);
+          continue;
+        }
+        const current = sessionQueryIndex.get(sessionId) || 0;
+        queryKeyByEventId.set(e.id, sessionId + ':q' + current + ':g' + globalQueryIndex);
       }
 
-      for (const e of providers) {
+      const byRound = new Map();
+      for (const e of events) {
         const p = getEventPayload(e);
-        if (p.round == null) continue;
-        const round = Number(p.round);
-        const existing = byRound.get(round) || { round, context: null, provider: null };
-        existing.provider = p;
-        byRound.set(round, existing);
+        const round = normalizeRound(p.round);
+        if (round == null) continue;
+        if (e.eventType !== 'context' && !(e.eventType === 'provider' && e.stage === 'end')) {
+          continue;
+        }
+
+        const queryKey = queryKeyByEventId.get(e.id) || '__unknown__:q0:g0';
+        const key = queryKey + ':r' + round;
+        const existing = byRound.get(key) || {
+          key,
+          round,
+          ts: e.ts,
+          context: null,
+          provider: null,
+        };
+        if (e.ts < existing.ts) existing.ts = e.ts;
+        if (e.eventType === 'context') {
+          existing.context = p;
+        } else if (e.eventType === 'provider' && e.stage === 'end') {
+          existing.provider = p;
+        }
+        byRound.set(key, existing);
       }
 
       return Array.from(byRound.values())
-        .sort((a, b) => a.round - b.round)
+        .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0))
         .map((row) => {
           const c = row.context || {};
           const p = row.provider || {};
@@ -1165,8 +1729,10 @@ function getDashboardHtml(): string {
           const promptTokens = resolvePromptTokens(p, c);
           const completionTokens = resolveCompletionTokens(p);
           const totalTokens = resolveTotalTokens(p, c);
+          const anchorId = 'round-' + String(row.key).replace(/[^a-zA-Z0-9_-]/g, '_');
           return {
             ...row,
+            anchorId,
             historyTokens,
             trimmedTokens,
             promptTokens,
@@ -1180,11 +1746,6 @@ function getDashboardHtml(): string {
     function renderContextPanel() {
       const latestContext = getLatestContextEvent();
       const latestProvider = getLatestProviderEvent();
-
-      if (!latestContext && !latestProvider) {
-        contextEl.innerHTML = '<div class="empty">No context/session data yet</div>';
-        return;
-      }
 
       const ctx = latestContext ? getEventPayload(latestContext) : {};
       const provider = latestProvider ? getEventPayload(latestProvider) : {};
@@ -1209,7 +1770,7 @@ function getDashboardHtml(): string {
                 row.totalTokens != null ? 't:' + row.totalTokens : '',
               ].filter(Boolean).join(' ');
               return '<tr>'
-                + '<td>' + esc(row.round) + '</td>'
+                + '<td><button class=\"round-jump\" data-anchor-id=\"' + esc(row.anchorId) + '\">' + esc(row.round) + '</button></td>'
                 + '<td>' + esc(((row.context && row.context.historyMessageCount) ?? '-') + ' / ' + (row.historyTokens ?? '-')) + '</td>'
                 + '<td>' + esc(((row.context && row.context.trimmedMessageCount) ?? '-') + ' / ' + (row.trimmedTokens ?? '-')) + '</td>'
                 + '<td>' + esc(usage || '-') + '</td>'
@@ -1233,18 +1794,13 @@ function getDashboardHtml(): string {
         + '<div class="card">'
         + '  <p class="card-title">Recent Rounds (msg/token)</p>'
         + roundsHtml
-        + '</div>';
+        + '</div>'
+        + renderFileBrowserCard();
     }
 
     function updateTopUsage() {
-      const providerEvents = allEvents.filter((e) => e.eventType === 'provider' && e.stage === 'end');
-      const contextByRound = new Map();
-      for (const e of allEvents) {
-        if (e.eventType !== 'context' || !e.payload) continue;
-        const p = getEventPayload(e);
-        if (p.round == null) continue;
-        contextByRound.set(Number(p.round), p);
-      }
+      const events = getFilteredEvents();
+      const providerEvents = events.filter((e) => e.eventType === 'provider' && e.stage === 'end');
       let prompt = 0;
       let completion = 0;
       let total = 0;
@@ -1252,10 +1808,9 @@ function getDashboardHtml(): string {
 
       for (const e of providerEvents) {
         const p = getEventPayload(e);
-        const ctx = p.round != null ? contextByRound.get(Number(p.round)) : null;
-        const pt = resolvePromptTokens(p, ctx);
+        const pt = asNumber(p.promptTokenCount);
         const ct = resolveCompletionTokens(p);
-        const tt = resolveTotalTokens(p, ctx);
+        const tt = asNumber(p.totalTokenCount);
         if (pt != null) {
           prompt += pt;
           hasAny = true;
@@ -1388,6 +1943,8 @@ function getDashboardHtml(): string {
       if (!currentChat) return;
       const data = await fetchJson('/api/events?chat_jid=' + encodeURIComponent(currentChat) + '&limit=400');
       allEvents = (data.events || []).slice().reverse();
+      refreshSessionFilterOptions();
+      updateSelectedBadge();
       renderTimeline();
       renderContextPanel();
       updateTopUsage();
@@ -1402,9 +1959,20 @@ function getDashboardHtml(): string {
         return;
       }
       allEvents.push(event);
+      const payload = getEventPayload(event);
+      if (
+        event.eventType === 'lifecycle'
+        && payload.message === 'session_reset'
+      ) {
+        currentSessionFilter = '__latest__';
+        sessionFilterInitialized = true;
+        setStreamStatus('session reset, waiting for next query...');
+      }
       if (allEvents.length > 1600) {
         allEvents = allEvents.slice(allEvents.length - 1600);
       }
+      refreshSessionFilterOptions();
+      updateSelectedBadge();
       renderTimeline();
       renderContextPanel();
       updateTopUsage();
@@ -1436,9 +2004,21 @@ function getDashboardHtml(): string {
 
     async function selectChat(jid) {
       currentChat = jid;
-      selectedEl.textContent = 'chat: ' + jid;
+      currentSessionFilter = '__latest__';
+      sessionFilterInitialized = false;
+      showAllSessionOptions = false;
+      fileBrowserPath = '';
+      fileBrowserEntries = [];
+      fileBrowserError = '';
+      filePreviewPath = '';
+      filePreviewContent = '';
+      filePreviewError = '';
+      fileBrowserLoading = false;
+      filePreviewLoading = false;
+      updateSelectedBadge();
       droppedEvents = 0;
       await Promise.all([loadGroups(), loadQueue(), loadMessages(), loadEvents()]);
+      await loadFileBrowser('');
       connectStream();
       requestAnimationFrame(() => scrollToBottom(false));
     }
@@ -1446,11 +2026,84 @@ function getDashboardHtml(): string {
     function bindUiEvents() {
       groupSearchEl.addEventListener('input', renderGroups);
       timelineSearchEl.addEventListener('input', renderTimeline);
+      sessionFilterEl.addEventListener('change', () => {
+        currentSessionFilter = sessionFilterEl.value || '__all__';
+        sessionFilterInitialized = true;
+        updateSelectedBadge();
+        renderTimeline();
+        renderContextPanel();
+        updateTopUsage();
+      });
+      sessionMoreBtnEl.addEventListener('click', () => {
+        if (sessionMoreBtnEl.disabled) return;
+        showAllSessionOptions = !showAllSessionOptions;
+        refreshSessionFilterOptions();
+      });
       showOpsEl.addEventListener('change', renderTimeline);
+      contextEl.addEventListener('click', (ev) => {
+        const target = ev.target;
+        if (!target || !target.closest) return;
+        const btn = target.closest('.round-jump');
+        if (btn) {
+          const anchorId = btn.getAttribute('data-anchor-id');
+          jumpToRound(anchorId);
+          return;
+        }
+
+        const actionBtn = target.closest('[data-file-action]');
+        if (actionBtn) {
+          const action = actionBtn.getAttribute('data-file-action');
+          if (action === 'refresh') {
+            loadFileBrowser(fileBrowserPath).catch(() => {});
+            return;
+          }
+          if (action === 'up') {
+            const parentPath = fileBrowserPath
+              ? fileBrowserPath.split('/').slice(0, -1).join('/')
+              : '';
+            loadFileBrowser(parentPath).catch(() => {});
+            return;
+          }
+          if (action === 'root') {
+            loadFileBrowser('').catch(() => {});
+            return;
+          }
+        }
+
+        const fileRow = target.closest('.file-row');
+        if (fileRow) {
+          const filePath = fileRow.getAttribute('data-file-path') || '';
+          const fileKind = fileRow.getAttribute('data-file-kind') || '';
+          fileTreeSelected = filePath;
+          if (fileKind === 'dir') {
+            if (ev.detail === 1) {
+              toggleTreeDir(filePath);
+            }
+          } else if (fileKind === 'file') {
+            loadFilePreview(filePath).catch(() => {});
+          } else {
+            renderContextPanel();
+          }
+        }
+      });
+      contextEl.addEventListener('dblclick', (ev) => {
+        const target = ev.target;
+        if (!target || !target.closest) return;
+        const fileRow = target.closest('.file-row');
+        if (!fileRow) return;
+        const filePath = fileRow.getAttribute('data-file-path') || '';
+        const fileKind = fileRow.getAttribute('data-file-kind') || '';
+        if (fileKind === 'dir') {
+          fileTreeSelected = filePath;
+          loadFileBrowser(filePath).catch(() => {});
+        }
+      });
       newSessionBtnEl.addEventListener('click', async () => {
         if (!currentChat) return;
         try {
           newSessionBtnEl.disabled = true;
+          currentSessionFilter = '__latest__';
+          sessionFilterInitialized = true;
           const result = await postJson('/api/session/reset?chat_jid=' + encodeURIComponent(currentChat));
           setStreamStatus(result && result.message ? result.message : 'session reset');
           await loadEvents();
@@ -1483,9 +2136,10 @@ function getDashboardHtml(): string {
       statusEl.textContent = 'ok @ ' + health.now;
 
       if (currentChat) {
-        selectedEl.textContent = 'chat: ' + currentChat;
+        updateSelectedBadge();
         await loadMessages();
         await loadEvents();
+        await loadFileBrowser('');
         connectStream();
         requestAnimationFrame(() => scrollToBottom(false));
       }
@@ -1612,6 +2266,103 @@ export function startDashboardServer(
         .filter((row) => row.event_type === 'context')
         .slice(0, limit);
       sendJson(res, 200, { events: rows.map(toParsedEvent) });
+      return;
+    }
+
+    if (reqUrl.pathname === '/api/files/list') {
+      const chatJid = reqUrl.searchParams.get('chat_jid');
+      if (!chatJid) {
+        sendJson(res, 400, { error: 'chat_jid is required' });
+        return;
+      }
+      try {
+        const workspace = resolveGroupWorkspace(chatJid);
+        const resolved = resolveWorkspacePath(
+          workspace.baseDir,
+          reqUrl.searchParams.get('path'),
+        );
+        const stat = fs.statSync(resolved.absPath);
+        if (!stat.isDirectory()) {
+          sendJson(res, 400, { error: 'path is not a directory' });
+          return;
+        }
+
+        const entries = fs
+          .readdirSync(resolved.absPath, { withFileTypes: true })
+          .slice(0, 500)
+          .map((entry) => {
+            const absEntryPath = path.join(resolved.absPath, entry.name);
+            const entryStat = fs.statSync(absEntryPath);
+            return {
+              name: entry.name,
+              type: entry.isDirectory() ? 'dir' : 'file',
+              size: entry.isDirectory() ? null : entryStat.size,
+              mtimeMs: entryStat.mtimeMs,
+            };
+          })
+          .sort((a, b) => {
+            if (a.type !== b.type) {
+              return a.type === 'dir' ? -1 : 1;
+            }
+            return a.name.localeCompare(b.name);
+          });
+
+        sendJson(res, 200, {
+          groupFolder: workspace.groupFolder,
+          currentPath: resolved.relPath,
+          parentPath: resolved.relPath
+            ? path.dirname(resolved.relPath).replace(/\\/g, '/').replace(/^\.$/, '')
+            : '',
+          entries,
+        });
+      } catch (err) {
+        sendJson(res, 400, {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
+    if (reqUrl.pathname === '/api/files/read') {
+      const chatJid = reqUrl.searchParams.get('chat_jid');
+      if (!chatJid) {
+        sendJson(res, 400, { error: 'chat_jid is required' });
+        return;
+      }
+      try {
+        const workspace = resolveGroupWorkspace(chatJid);
+        const resolved = resolveWorkspacePath(
+          workspace.baseDir,
+          reqUrl.searchParams.get('path'),
+        );
+        const stat = fs.statSync(resolved.absPath);
+        if (!stat.isFile()) {
+          sendJson(res, 400, { error: 'path is not a file' });
+          return;
+        }
+        if (stat.size > 2 * 1024 * 1024) {
+          sendJson(res, 400, { error: 'file too large for preview (>2MB)' });
+          return;
+        }
+        const buffer = fs.readFileSync(resolved.absPath);
+        if (!isProbablyText(buffer)) {
+          sendJson(res, 400, { error: 'binary file preview is not supported' });
+          return;
+        }
+        const raw = buffer.toString('utf-8');
+        const truncated = raw.length > 30_000
+          ? `${raw.slice(0, 30_000)}\n...[truncated ${raw.length - 30_000} chars]`
+          : raw;
+        sendJson(res, 200, {
+          path: resolved.relPath,
+          size: stat.size,
+          content: truncated,
+        });
+      } catch (err) {
+        sendJson(res, 400, {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       return;
     }
 

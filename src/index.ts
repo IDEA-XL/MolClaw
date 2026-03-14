@@ -65,6 +65,7 @@ export { escapeXml, formatMessages } from './router.js';
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
+let sessionResetVersions: Record<string, number> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
@@ -243,6 +244,7 @@ function resetChatSession(chatJid: string, source: string): SessionResetResult {
     delete sessions[group.folder];
   }
   clearSession(group.folder);
+  sessionResetVersions[group.folder] = (sessionResetVersions[group.folder] || 0) + 1;
 
   queue.closeStdin(chatJid);
 
@@ -490,6 +492,7 @@ async function runAgent(
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
+  const runSessionVersion = sessionResetVersions[group.folder] || 0;
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -520,8 +523,20 @@ async function runAgent(
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          if ((sessionResetVersions[group.folder] || 0) === runSessionVersion) {
+            sessions[group.folder] = output.newSessionId;
+            setSession(group.folder, output.newSessionId);
+          } else {
+            logger.info(
+              {
+                group: group.name,
+                staleSessionId: output.newSessionId,
+                runSessionVersion,
+                currentSessionVersion: sessionResetVersions[group.folder] || 0,
+              },
+              'Ignored stale session update after reset',
+            );
+          }
         }
         await onOutput(output);
       }
@@ -542,8 +557,20 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      if ((sessionResetVersions[group.folder] || 0) === runSessionVersion) {
+        sessions[group.folder] = output.newSessionId;
+        setSession(group.folder, output.newSessionId);
+      } else {
+        logger.info(
+          {
+            group: group.name,
+            staleSessionId: output.newSessionId,
+            runSessionVersion,
+            currentSessionVersion: sessionResetVersions[group.folder] || 0,
+          },
+          'Ignored stale final session update after reset',
+        );
+      }
     }
 
     if (output.status === 'error') {
