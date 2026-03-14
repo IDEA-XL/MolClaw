@@ -12,6 +12,7 @@ import {
 } from './config.js';
 import { ContainerOutput, runContainerAgent, writeTasksSnapshot } from './container-runner.js';
 import {
+  AgentEventInput,
   getAllTasks,
   getDueTasks,
   getTaskById,
@@ -28,6 +29,7 @@ export interface SchedulerDependencies {
   queue: GroupQueue;
   onProcess: (groupJid: string, proc: ChildProcess, containerName: string, groupFolder: string) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
+  onAgentEvent?: (event: AgentEventInput) => void;
 }
 
 async function runTask(
@@ -88,6 +90,19 @@ async function runTask(
   const sessions = deps.getSessions();
   const sessionId =
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
+  deps.onAgentEvent?.({
+    ts: new Date().toISOString(),
+    chatJid: task.chat_jid,
+    groupFolder: task.group_folder,
+    sessionId,
+    eventType: 'task',
+    stage: 'start',
+    payload: {
+      taskId: task.id,
+      scheduleType: task.schedule_type,
+      contextMode: task.context_mode,
+    },
+  });
 
   // Idle timer: writes _close sentinel after IDLE_TIMEOUT of no output,
   // so the container exits instead of hanging at waitForIpcMessage forever.
@@ -115,6 +130,18 @@ async function runTask(
       (proc, containerName) => deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.status === 'progress') {
+          deps.onAgentEvent?.({
+            ts: streamedOutput.progress?.timestamp || new Date().toISOString(),
+            chatJid: task.chat_jid,
+            groupFolder: task.group_folder,
+            sessionId: streamedOutput.newSessionId || sessionId,
+            eventType: streamedOutput.progress?.type || 'lifecycle',
+            stage: streamedOutput.progress?.stage || 'info',
+            payload: {
+              ...(streamedOutput.progress || {}),
+              taskId: task.id,
+            },
+          });
           logger.info(
             { taskId: task.id, progress: streamedOutput.progress },
             'Scheduled task progress',
@@ -124,12 +151,36 @@ async function runTask(
 
         if (streamedOutput.result) {
           result = streamedOutput.result;
+          deps.onAgentEvent?.({
+            ts: new Date().toISOString(),
+            chatJid: task.chat_jid,
+            groupFolder: task.group_folder,
+            sessionId: streamedOutput.newSessionId || sessionId,
+            eventType: 'final_output',
+            stage: 'info',
+            payload: {
+              taskId: task.id,
+              length: streamedOutput.result.length,
+            },
+          });
           // Forward result to user (sendMessage handles formatting)
           await deps.sendMessage(task.chat_jid, streamedOutput.result);
           // Only reset idle timer on actual results, not session-update markers
           resetIdleTimer();
         }
         if (streamedOutput.status === 'error') {
+          deps.onAgentEvent?.({
+            ts: new Date().toISOString(),
+            chatJid: task.chat_jid,
+            groupFolder: task.group_folder,
+            sessionId: streamedOutput.newSessionId || sessionId,
+            eventType: 'error',
+            stage: 'error',
+            payload: {
+              taskId: task.id,
+              error: streamedOutput.error || 'Unknown error',
+            },
+          });
           error = streamedOutput.error || 'Unknown error';
         }
       },
@@ -148,10 +199,35 @@ async function runTask(
       { taskId: task.id, durationMs: Date.now() - startTime },
       'Task completed',
     );
+    deps.onAgentEvent?.({
+      ts: new Date().toISOString(),
+      chatJid: task.chat_jid,
+      groupFolder: task.group_folder,
+      sessionId,
+      eventType: 'task',
+      stage: error ? 'error' : 'end',
+      payload: {
+        taskId: task.id,
+        durationMs: Date.now() - startTime,
+        error: error || undefined,
+      },
+    });
   } catch (err) {
     if (idleTimer) clearTimeout(idleTimer);
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
+    deps.onAgentEvent?.({
+      ts: new Date().toISOString(),
+      chatJid: task.chat_jid,
+      groupFolder: task.group_folder,
+      sessionId,
+      eventType: 'task',
+      stage: 'error',
+      payload: {
+        taskId: task.id,
+        error,
+      },
+    });
   }
 
   const durationMs = Date.now() - startTime;

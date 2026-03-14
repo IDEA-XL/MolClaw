@@ -7,6 +7,27 @@ import { NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.
 
 let db: Database.Database;
 
+export interface AgentEventRecord {
+  id: number;
+  ts: string;
+  chat_jid: string;
+  group_folder: string;
+  session_id: string | null;
+  event_type: string;
+  stage: string;
+  payload_json: string | null;
+}
+
+export interface AgentEventInput {
+  ts: string;
+  chatJid: string;
+  groupFolder: string;
+  sessionId?: string;
+  eventType: string;
+  stage: string;
+  payload?: Record<string, unknown>;
+}
+
 function createSchema(database: Database.Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS chats (
@@ -72,6 +93,18 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+    CREATE TABLE IF NOT EXISTS agent_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      session_id TEXT,
+      event_type TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      payload_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_events_ts ON agent_events(ts);
+    CREATE INDEX IF NOT EXISTS idx_agent_events_chat_ts ON agent_events(chat_jid, ts);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -165,6 +198,75 @@ export function getAllChats(): ChatInfo[] {
   `,
     )
     .all() as ChatInfo[];
+}
+
+export function insertAgentEvent(event: AgentEventInput): number {
+  const payload =
+    event.payload && Object.keys(event.payload).length > 0
+      ? JSON.stringify(event.payload)
+      : null;
+  const result = db
+    .prepare(
+      `
+    INSERT INTO agent_events (ts, chat_jid, group_folder, session_id, event_type, stage, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `,
+    )
+    .run(
+      event.ts,
+      event.chatJid,
+      event.groupFolder,
+      event.sessionId || null,
+      event.eventType,
+      event.stage,
+      payload,
+    );
+  return Number(result.lastInsertRowid);
+}
+
+export function getAgentEvents(
+  chatJid?: string,
+  limit = 200,
+): AgentEventRecord[] {
+  const safeLimit = Math.max(1, Math.min(1000, Math.floor(limit)));
+  if (chatJid) {
+    return db
+      .prepare(
+        `
+      SELECT id, ts, chat_jid, group_folder, session_id, event_type, stage, payload_json
+      FROM agent_events
+      WHERE chat_jid = ?
+      ORDER BY id DESC
+      LIMIT ?
+    `,
+      )
+      .all(chatJid, safeLimit) as AgentEventRecord[];
+  }
+
+  return db
+    .prepare(
+      `
+    SELECT id, ts, chat_jid, group_folder, session_id, event_type, stage, payload_json
+    FROM agent_events
+    ORDER BY id DESC
+    LIMIT ?
+  `,
+    )
+    .all(safeLimit) as AgentEventRecord[];
+}
+
+export function getLatestContextEvent(chatJid: string): AgentEventRecord | undefined {
+  return db
+    .prepare(
+      `
+    SELECT id, ts, chat_jid, group_folder, session_id, event_type, stage, payload_json
+    FROM agent_events
+    WHERE chat_jid = ? AND event_type = 'context'
+    ORDER BY id DESC
+    LIMIT 1
+  `,
+    )
+    .get(chatJid) as AgentEventRecord | undefined;
 }
 
 /**
@@ -274,6 +376,54 @@ export function getMessagesSince(
   return db
     .prepare(sql)
     .all(chatJid, sinceTimestamp, `${botPrefix}:%`) as NewMessage[];
+}
+
+export function getRecentMessages(
+  chatJid: string,
+  limit = 200,
+  botPrefix?: string,
+): NewMessage[] {
+  const safeLimit = Math.max(1, Math.min(1000, Math.floor(limit)));
+  type RawMessageRow = {
+    id: string;
+    chat_jid: string;
+    sender: string;
+    sender_name: string;
+    content: string;
+    timestamp: string;
+    is_from_me: number;
+  };
+  const rows = botPrefix
+    ? (db
+        .prepare(
+          `
+        SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+        FROM messages
+        WHERE chat_jid = ? AND content NOT LIKE ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+      `,
+        )
+        .all(chatJid, `${botPrefix}:%`, safeLimit) as RawMessageRow[])
+    : (db
+        .prepare(
+          `
+        SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+        FROM messages
+        WHERE chat_jid = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+      `,
+        )
+        .all(chatJid, safeLimit) as RawMessageRow[]);
+
+  return rows
+    .slice()
+    .reverse()
+    .map((row) => ({
+      ...row,
+      is_from_me: !!row.is_from_me,
+    }));
 }
 
 export function createTask(

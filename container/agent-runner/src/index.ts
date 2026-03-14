@@ -34,18 +34,33 @@ interface ContainerOutput {
 }
 
 interface AgentProgressEvent {
-  type: 'lifecycle' | 'provider' | 'tool';
+  type: 'lifecycle' | 'provider' | 'tool' | 'context';
   stage: 'start' | 'end' | 'info' | 'error';
   message?: string;
   round?: number;
   model?: string;
   toolName?: string;
   toolCallId?: string;
+  toolCallNames?: string;
   argsSummary?: string;
+  toolArgs?: Record<string, unknown>;
   durationMs?: number;
   success?: boolean;
   contentChars?: number;
+  contentTokenCount?: number;
+  contentPreview?: string;
+  outputPreview?: string;
+  output?: string;
   toolCalls?: number;
+  historyMessageCount?: number;
+  historyCharCount?: number;
+  historyTokenCount?: number;
+  trimmedMessageCount?: number;
+  trimmedCharCount?: number;
+  trimmedTokenCount?: number;
+  promptTokenCount?: number;
+  completionTokenCount?: number;
+  totalTokenCount?: number;
   timestamp: string;
 }
 
@@ -84,6 +99,13 @@ interface ChatCompletionResponse {
   error?: {
     message?: string;
     type?: string;
+  };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    input_tokens?: number;
+    output_tokens?: number;
   };
 }
 
@@ -505,6 +527,18 @@ function summarizeToolArgs(rawArgs: string, maxChars = 260): string {
   return `${compact.slice(0, maxChars)}...[truncated ${compact.length - maxChars} chars]`;
 }
 
+function parseToolArgs(rawArgs: string): Record<string, unknown> | null {
+  try {
+    const parsed = rawArgs ? JSON.parse(rawArgs) : {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 function ensureString(value: unknown, fieldName: string): string {
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error(`${fieldName} must be a non-empty string`);
@@ -851,7 +885,58 @@ function trimMessages(messages: ChatMessage[], maxChars = 140_000): ChatMessage[
     total += size;
   }
 
-  return trimmed;
+  return removeOrphanToolMessages(trimmed);
+}
+
+function removeOrphanToolMessages(messages: ChatMessage[]): ChatMessage[] {
+  const validToolCallIds = new Set<string>();
+
+  for (const message of messages) {
+    if (message.role !== 'assistant' || !message.tool_calls) continue;
+    for (const toolCall of message.tool_calls) {
+      if (toolCall && typeof toolCall.id === 'string' && toolCall.id) {
+        validToolCallIds.add(toolCall.id);
+      }
+    }
+  }
+
+  return messages.filter((message) => {
+    if (message.role !== 'tool') return true;
+    if (!message.tool_call_id) return false;
+    return validToolCallIds.has(message.tool_call_id);
+  });
+}
+
+function getMessagesCharCount(messages: ChatMessage[]): number {
+  return messages.reduce(
+    (total, message) => total + JSON.stringify(message).length,
+    0,
+  );
+}
+
+function estimateTokenCount(text: string): number {
+  const normalized = text.trim();
+  if (!normalized) return 0;
+  // Practical heuristic for mixed English/CJK content when provider usage is unavailable.
+  return Math.max(1, Math.ceil(normalized.length / 4));
+}
+
+function getMessagesTokenCount(messages: ChatMessage[]): number {
+  let total = 0;
+  for (const message of messages) {
+    let text = message.content || '';
+    if (message.tool_calls && message.tool_calls.length > 0) {
+      text += JSON.stringify(message.tool_calls);
+    }
+    if (message.tool_call_id) {
+      text += message.tool_call_id;
+    }
+    if (message.name) {
+      text += message.name;
+    }
+    total += estimateTokenCount(text) + 4;
+  }
+  return total;
 }
 
 function renderConversationArchive(session: SessionState): string {
@@ -983,7 +1068,15 @@ function buildSystemPrompt(containerInput: ContainerInput): string {
 async function callChatCompletion(
   providerConfig: ProviderConfig,
   messages: ChatMessage[],
-): Promise<{ content: string; toolCalls: ToolCall[] }> {
+): Promise<{
+  content: string;
+  toolCalls: ToolCall[];
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
+}> {
   const payload: Record<string, unknown> = {
     model: providerConfig.model,
     messages,
@@ -1032,6 +1125,14 @@ async function callChatCompletion(
   return {
     content: extractTextContent(message.content),
     toolCalls: Array.isArray(message.tool_calls) ? message.tool_calls : [],
+    usage: parsed.usage
+      ? {
+          promptTokens: parsed.usage.prompt_tokens ?? parsed.usage.input_tokens,
+          completionTokens:
+            parsed.usage.completion_tokens ?? parsed.usage.output_tokens,
+          totalTokens: parsed.usage.total_tokens,
+        }
+      : undefined,
   };
 }
 
@@ -1510,6 +1611,19 @@ async function runQuery(
     }
 
     log(`Calling provider model ${providerConfig.model} (round ${roundNumber})`);
+    const trimmedMessages = trimMessages(session.messages);
+    writeProgress({
+      type: 'context',
+      stage: 'info',
+      round: roundNumber,
+      model: providerConfig.model,
+      historyMessageCount: session.messages.length,
+      historyCharCount: getMessagesCharCount(session.messages),
+      historyTokenCount: getMessagesTokenCount(session.messages),
+      trimmedMessageCount: trimmedMessages.length,
+      trimmedCharCount: getMessagesCharCount(trimmedMessages),
+      trimmedTokenCount: getMessagesTokenCount(trimmedMessages),
+    }, session.sessionId);
     writeProgress({
       type: 'provider',
       stage: 'start',
@@ -1518,11 +1632,19 @@ async function runQuery(
     }, session.sessionId);
 
     const providerStartedAt = Date.now();
-    let response: { content: string; toolCalls: ToolCall[] };
+    let response: {
+      content: string;
+      toolCalls: ToolCall[];
+      usage?: {
+        promptTokens?: number;
+        completionTokens?: number;
+        totalTokens?: number;
+      };
+    };
     try {
       response = await callChatCompletion(
         providerConfig,
-        [systemPrompt, ...trimMessages(session.messages)],
+        [systemPrompt, ...trimmedMessages],
       );
     } catch (err) {
       writeProgress({
@@ -1536,6 +1658,14 @@ async function runQuery(
       throw err;
     }
     const providerDurationMs = Date.now() - providerStartedAt;
+    const content = response.content.trim();
+    const completionTokenCount =
+      response.usage?.completionTokens ?? estimateTokenCount(content);
+    const promptTokenCount =
+      response.usage?.promptTokens ??
+      getMessagesTokenCount([systemPrompt, ...trimmedMessages]);
+    const totalTokenCount =
+      response.usage?.totalTokens ?? promptTokenCount + completionTokenCount;
     writeProgress({
       type: 'provider',
       stage: 'end',
@@ -1543,7 +1673,15 @@ async function runQuery(
       model: providerConfig.model,
       durationMs: providerDurationMs,
       toolCalls: response.toolCalls.length,
-      contentChars: response.content.trim().length,
+      toolCallNames: response.toolCalls
+        .map((call) => call.function.name)
+        .join(', '),
+      contentChars: content.length,
+      contentTokenCount: completionTokenCount,
+      promptTokenCount,
+      completionTokenCount,
+      totalTokenCount,
+      contentPreview: truncate(content, 6000),
     }, session.sessionId);
 
     session.messages.push({
@@ -1557,19 +1695,21 @@ async function runQuery(
         type: 'lifecycle',
         stage: 'info',
         message: 'final_response_ready',
-        contentChars: response.content.trim().length,
+        contentChars: content.length,
+        contentTokenCount: completionTokenCount,
       }, session.sessionId);
       saveSession(session);
       writeConversationArchive(session);
       return {
         newSessionId: session.sessionId,
         closedDuringQuery: false,
-        result: response.content.trim() || null,
+        result: content || null,
       };
     }
 
     for (const toolCall of response.toolCalls) {
       log(`Executing tool ${toolCall.function.name}`);
+      const parsedToolArgs = parseToolArgs(toolCall.function.arguments || '{}');
       writeProgress({
         type: 'tool',
         stage: 'start',
@@ -1577,6 +1717,7 @@ async function runQuery(
         toolName: toolCall.function.name,
         toolCallId: toolCall.id,
         argsSummary: summarizeToolArgs(toolCall.function.arguments || '{}'),
+        toolArgs: parsedToolArgs || undefined,
       }, session.sessionId);
 
       const toolStartedAt = Date.now();
@@ -1590,6 +1731,8 @@ async function runQuery(
         toolCallId: toolCall.id,
         durationMs: toolDurationMs,
         success: toolResult.success,
+        outputPreview: truncate(toolResult.output, 12000),
+        output: truncate(toolResult.output, 12000),
       }, session.sessionId);
 
       session.messages.push({

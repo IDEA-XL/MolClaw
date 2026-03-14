@@ -1,7 +1,8 @@
 # BioClaw Agent Container
 # Runs Claude Agent SDK in isolated Linux VM with biology tools and browser automation
 
-FROM node:22-slim
+ARG BASE_IMAGE=node:22-slim
+FROM ${BASE_IMAGE}
 
 # Use faster, more reliable mirrors in this network environment.
 RUN sed -i \

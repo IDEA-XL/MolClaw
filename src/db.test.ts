@@ -5,6 +5,7 @@ import {
   createTask,
   deleteTask,
   getAllChats,
+  getRecentMessages,
   getMessagesSince,
   getNewMessages,
   getTaskById,
@@ -218,6 +219,41 @@ describe('getNewMessages', () => {
     const { messages, newTimestamp } = getNewMessages([], '', 'Bio');
     expect(messages).toHaveLength(0);
     expect(newTimestamp).toBe('');
+  });
+});
+
+// --- getRecentMessages ---
+
+describe('getRecentMessages', () => {
+  beforeEach(() => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+    const msgs = [
+      { id: 'r1', content: 'one', ts: '2024-01-01T00:00:01.000Z' },
+      { id: 'r2', content: 'Bio: internal reply', ts: '2024-01-01T00:00:02.000Z' },
+      { id: 'r3', content: 'three', ts: '2024-01-01T00:00:03.000Z' },
+    ];
+    for (const m of msgs) {
+      store({
+        id: m.id,
+        chat_jid: 'group@g.us',
+        sender: 'user@s.whatsapp.net',
+        sender_name: 'User',
+        content: m.content,
+        timestamp: m.ts,
+      });
+    }
+  });
+
+  it('returns messages in ascending time order and applies limit', () => {
+    const messages = getRecentMessages('group@g.us', 2, 'Bio');
+    expect(messages).toHaveLength(2);
+    expect(messages[0].id).toBe('r1');
+    expect(messages[1].id).toBe('r3');
+  });
+
+  it('returns all message types when botPrefix is omitted', () => {
+    const messages = getRecentMessages('group@g.us', 10);
+    expect(messages).toHaveLength(3);
   });
 });
 

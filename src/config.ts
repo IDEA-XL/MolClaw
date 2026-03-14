@@ -30,6 +30,11 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
   10,
 ); // 10MB default
+export const DASHBOARD_ENABLED =
+  (process.env.DASHBOARD_ENABLED || 'false').toLowerCase() === 'true';
+export const DASHBOARD_HOST = process.env.DASHBOARD_HOST || '127.0.0.1';
+export const DASHBOARD_PORT = parseInt(process.env.DASHBOARD_PORT || '8787', 10);
+export const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(
   process.env.IDLE_TIMEOUT || '1800000',

@@ -6,6 +6,10 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   DATA_DIR,
+  DASHBOARD_ENABLED,
+  DASHBOARD_HOST,
+  DASHBOARD_PORT,
+  DASHBOARD_TOKEN,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
@@ -29,6 +33,7 @@ import {
 } from './container-runner.js';
 import {
   getAllChats,
+  AgentEventInput,
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
@@ -39,9 +44,12 @@ import {
   setRegisteredGroup,
   setRouterState,
   setSession,
+  insertAgentEvent,
   storeChatMetadata,
   storeMessage,
 } from './db.js';
+import { publishAgentEvent } from './agent-events.js';
+import { startDashboardServer, DashboardServerHandle } from './dashboard.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
@@ -63,6 +71,21 @@ let messageLoopRunning = false;
 let whatsapp: WhatsAppChannel | null = null;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+let dashboardServer: DashboardServerHandle | null = null;
+
+function recordAgentEvent(event: AgentEventInput): void {
+  const eventId = insertAgentEvent(event);
+  publishAgentEvent({
+    id: eventId,
+    ts: event.ts,
+    chatJid: event.chatJid,
+    groupFolder: event.groupFolder,
+    sessionId: event.sessionId,
+    eventType: event.eventType,
+    stage: event.stage,
+    payload: event.payload,
+  });
+}
 
 function summarizeProgress(progress?: AgentProgressEvent): string {
   if (!progress) return 'unknown progress event';
@@ -72,8 +95,19 @@ function summarizeProgress(progress?: AgentProgressEvent): string {
     const model = progress.model ? ` model=${progress.model}` : '';
     const duration = progress.durationMs !== undefined ? ` durationMs=${progress.durationMs}` : '';
     const toolCalls = progress.toolCalls !== undefined ? ` toolCalls=${progress.toolCalls}` : '';
-    const contentChars = progress.contentChars !== undefined ? ` contentChars=${progress.contentChars}` : '';
-    return `provider ${progress.stage}${round}${model}${duration}${toolCalls}${contentChars}`;
+    const promptTokens =
+      progress.promptTokenCount !== undefined
+        ? ` promptTokens=${progress.promptTokenCount}`
+        : '';
+    const completionTokens =
+      progress.completionTokenCount !== undefined
+        ? ` completionTokens=${progress.completionTokenCount}`
+        : '';
+    const totalTokens =
+      progress.totalTokenCount !== undefined
+        ? ` totalTokens=${progress.totalTokenCount}`
+        : '';
+    return `provider ${progress.stage}${round}${model}${duration}${toolCalls}${promptTokens}${completionTokens}${totalTokens}`;
   }
 
   if (progress.type === 'tool') {
@@ -82,6 +116,27 @@ function summarizeProgress(progress?: AgentProgressEvent): string {
     const duration = progress.durationMs !== undefined ? ` durationMs=${progress.durationMs}` : '';
     const success = progress.success !== undefined ? ` success=${progress.success}` : '';
     return `tool ${progress.stage}${round}${tool}${duration}${success}`;
+  }
+
+  if (progress.type === 'context') {
+    const round = progress.round ? ` round=${progress.round}` : '';
+    const historyMessages =
+      progress.historyMessageCount !== undefined
+        ? ` historyMessages=${progress.historyMessageCount}`
+        : '';
+    const historyTokens =
+      progress.historyTokenCount !== undefined
+        ? ` historyTokens=${progress.historyTokenCount}`
+        : '';
+    const trimmedMessages =
+      progress.trimmedMessageCount !== undefined
+        ? ` trimmedMessages=${progress.trimmedMessageCount}`
+        : '';
+    const trimmedTokens =
+      progress.trimmedTokenCount !== undefined
+        ? ` trimmedTokens=${progress.trimmedTokenCount}`
+        : '';
+    return `context ${progress.stage}${round}${historyMessages}${historyTokens}${trimmedMessages}${trimmedTokens}`;
   }
 
   return progress.message
@@ -200,6 +255,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     { group: group.name, messageCount: missedMessages.length },
     'Processing messages',
   );
+  recordAgentEvent({
+    ts: new Date().toISOString(),
+    chatJid,
+    groupFolder: group.folder,
+    sessionId: sessions[group.folder],
+    eventType: 'message',
+    stage: 'start',
+    payload: {
+      messageCount: missedMessages.length,
+      requiresTrigger: group.requiresTrigger !== false,
+    },
+  });
 
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -218,6 +285,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     if (result.status === 'progress') {
+      recordAgentEvent({
+        ts: result.progress?.timestamp || new Date().toISOString(),
+        chatJid,
+        groupFolder: group.folder,
+        sessionId: result.newSessionId || sessions[group.folder],
+        eventType: result.progress?.type || 'lifecycle',
+        stage: result.progress?.stage || 'info',
+        payload: result.progress
+          ? { ...result.progress }
+          : { message: 'missing progress payload' },
+      });
       logger.info(
         {
           group: group.name,
@@ -233,6 +311,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (result.result) {
       const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
+      recordAgentEvent({
+        ts: new Date().toISOString(),
+        chatJid,
+        groupFolder: group.folder,
+        sessionId: result.newSessionId || sessions[group.folder],
+        eventType: 'final_output',
+        stage: 'info',
+        payload: {
+          length: raw.length,
+          tokenCountEstimate: Math.max(1, Math.ceil(raw.length / 4)),
+          text: raw.slice(0, 12000),
+          preview: raw.slice(0, 300),
+        },
+      });
       const text = formatOutbound(channel, raw);
       if (text) {
         await channel.sendMessage(chatJid, text);
@@ -243,6 +335,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
 
     if (result.status === 'error') {
+      recordAgentEvent({
+        ts: new Date().toISOString(),
+        chatJid,
+        groupFolder: group.folder,
+        sessionId: result.newSessionId || sessions[group.folder],
+        eventType: 'error',
+        stage: 'error',
+        payload: {
+          error: result.error || 'Unknown error',
+        },
+      });
       hadError = true;
     }
   });
@@ -496,6 +599,14 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    if (dashboardServer) {
+      try {
+        await dashboardServer.close();
+      } catch (err) {
+        logger.warn({ err }, 'Failed to stop dashboard server cleanly');
+      }
+      dashboardServer = null;
+    }
     await queue.shutdown(10000);
     for (const ch of channels) {
       await ch.disconnect();
@@ -514,6 +625,10 @@ async function main(): Promise<void> {
     'http_proxy',
     'ALL_PROXY',
     'all_proxy',
+    'DASHBOARD_ENABLED',
+    'DASHBOARD_HOST',
+    'DASHBOARD_PORT',
+    'DASHBOARD_TOKEN',
   ]);
 
   // Allow putting proxy vars in `.env` (without exporting them in the shell).
@@ -584,6 +699,33 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const dashboardEnabledRaw =
+    process.env.DASHBOARD_ENABLED ??
+    env.DASHBOARD_ENABLED ??
+    String(DASHBOARD_ENABLED);
+  const dashboardEnabled = dashboardEnabledRaw.toLowerCase() === 'true';
+  const dashboardHost =
+    process.env.DASHBOARD_HOST || env.DASHBOARD_HOST || DASHBOARD_HOST;
+  const dashboardPort = Number.parseInt(
+    process.env.DASHBOARD_PORT || env.DASHBOARD_PORT || String(DASHBOARD_PORT),
+    10,
+  );
+  const dashboardToken =
+    process.env.DASHBOARD_TOKEN || env.DASHBOARD_TOKEN || DASHBOARD_TOKEN;
+
+  if (dashboardEnabled) {
+    dashboardServer = startDashboardServer(
+      {
+        host: dashboardHost,
+        port: Number.isFinite(dashboardPort) ? dashboardPort : DASHBOARD_PORT,
+        token: dashboardToken || undefined,
+      },
+      {
+        getQueueSnapshot: () => queue.getSnapshot(),
+      },
+    );
+  }
+
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
@@ -599,6 +741,7 @@ async function main(): Promise<void> {
       const text = formatOutbound(channel, rawText);
       if (text) await channel.sendMessage(jid, text);
     },
+    onAgentEvent: recordAgentEvent,
   });
   startIpcWatcher({
     sendMessage: async (jid, text) => {

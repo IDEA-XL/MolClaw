@@ -52,18 +52,33 @@ export interface ContainerOutput {
 }
 
 export interface AgentProgressEvent {
-  type: 'lifecycle' | 'provider' | 'tool';
+  type: 'lifecycle' | 'provider' | 'tool' | 'context';
   stage: 'start' | 'end' | 'info' | 'error';
   message?: string;
   round?: number;
   model?: string;
   toolName?: string;
   toolCallId?: string;
+  toolCallNames?: string;
   argsSummary?: string;
+  toolArgs?: Record<string, unknown>;
   durationMs?: number;
   success?: boolean;
   contentChars?: number;
+  contentTokenCount?: number;
+  contentPreview?: string;
+  outputPreview?: string;
+  output?: string;
   toolCalls?: number;
+  historyMessageCount?: number;
+  historyCharCount?: number;
+  historyTokenCount?: number;
+  trimmedMessageCount?: number;
+  trimmedCharCount?: number;
+  trimmedTokenCount?: number;
+  promptTokenCount?: number;
+  completionTokenCount?: number;
+  totalTokenCount?: number;
   timestamp: string;
 }
 
