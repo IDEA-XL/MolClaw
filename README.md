@@ -142,21 +142,7 @@ This project builds on ideas and components from:
 
 - NanoClaw: https://github.com/qwibitai/nanoclaw
 - STELLA: https://github.com/zaixizhang/STELLA
-
-## Citation
-
-If this project helps your research, please cite the BioClaw paper:
-
-```bibtex
-@article{zhang2025bioclaw,
-  title={BioClaw: A Generalist AI Agent for Computational Biology in Conversational Workflows},
-  author={Zhang, Zaixi and others},
-  year={2025},
-  eprint={2507.02004},
-  archivePrefix={arXiv},
-  primaryClass={q-bio.QM}
-}
-```
+- BioClaw: https://github.com/Runchuan-BU/BioClaw
 
 ## License
 
