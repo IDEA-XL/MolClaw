@@ -11,6 +11,8 @@ import {
   POLL_INTERVAL,
   TRIGGER_PATTERN,
 } from './config.js';
+import { readEnvFile } from './env.js';
+import { DiscordChannel } from './channels/discord.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import {
   ContainerOutput,
@@ -35,9 +37,9 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
-import { formatMessages, formatOutbound } from './router.js';
+import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { NewMessage, RegisteredGroup } from './types.js';
+import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
 dns.setDefaultResultOrder('ipv4first');
@@ -52,6 +54,7 @@ let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
 let whatsapp: WhatsAppChannel;
+const channels: Channel[] = [];
 const queue = new GroupQueue();
 
 function loadState(): void {
@@ -102,7 +105,11 @@ export function getAvailableGroups(): import('./container-runner.js').AvailableG
   const registeredJids = new Set(Object.keys(registeredGroups));
 
   return chats
-    .filter((c) => c.jid !== '__group_sync__' && c.jid.endsWith('@g.us'))
+    .filter(
+      (c) =>
+        c.jid !== '__group_sync__' &&
+        (c.jid.endsWith('@g.us') || c.jid.startsWith('dc:')),
+    )
     .map((c) => ({
       jid: c.jid,
       name: c.name,
@@ -125,6 +132,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (!group) return true;
 
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
+  const channel = findChannel(channels, chatJid);
+  if (!channel) {
+    logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
+    return true;
+  }
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
   const missedMessages = getMessagesSince(
@@ -168,7 +180,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  await whatsapp.setTyping(chatJid, true);
+  await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -176,11 +188,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
+      const text = formatOutbound(channel, raw);
       if (text) {
-        await whatsapp.sendMessage(chatJid, `${ASSISTANT_NAME}: ${text}`);
+        await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -192,7 +203,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   });
 
-  await whatsapp.setTyping(chatJid, false);
+  await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -442,7 +453,9 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
     await queue.shutdown(10000);
-    await whatsapp.disconnect();
+    for (const ch of channels) {
+      await ch.disconnect();
+    }
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -454,9 +467,27 @@ async function main(): Promise<void> {
     onChatMetadata: (chatJid, timestamp) => storeChatMetadata(chatJid, timestamp),
     registeredGroups: () => registeredGroups,
   });
+  channels.push(whatsapp);
 
   // Connect — resolves when first connected
   await whatsapp.connect();
+
+  // Optional: Discord channel (if configured)
+  const env = readEnvFile(['DISCORD_BOT_TOKEN']);
+  const discordToken = process.env.DISCORD_BOT_TOKEN || env.DISCORD_BOT_TOKEN;
+  if (discordToken) {
+    const discord = new DiscordChannel(discordToken, {
+      onMessage: (chatJid, msg) => storeMessage(msg),
+      onChatMetadata: (chatJid, timestamp, name) =>
+        storeChatMetadata(chatJid, timestamp, name),
+      registeredGroups: () => registeredGroups,
+    });
+    channels.push(discord);
+    await discord.connect();
+    logger.info('Discord channel connected');
+  } else {
+    logger.info('Discord not configured (DISCORD_BOT_TOKEN missing)');
+  }
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
@@ -465,13 +496,32 @@ async function main(): Promise<void> {
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
-      const text = formatOutbound(whatsapp, rawText);
-      if (text) await whatsapp.sendMessage(jid, text);
+      const channel = findChannel(channels, jid);
+      if (!channel) {
+        logger.warn({ jid }, 'No channel for JID, cannot send message');
+        return;
+      }
+      const text = formatOutbound(channel, rawText);
+      if (text) await channel.sendMessage(jid, text);
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => whatsapp.sendMessage(jid, text),
-    sendImage: (jid, imagePath, caption) => whatsapp.sendImage(jid, imagePath, caption),
+    sendMessage: async (jid, text) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) {
+        logger.warn({ jid }, 'No channel for JID, cannot send IPC message');
+        return;
+      }
+      await channel.sendMessage(jid, text);
+    },
+    sendImage: async (jid, imagePath, caption) => {
+      const channel = findChannel(channels, jid);
+      if (!channel?.sendImage) {
+        logger.warn({ jid }, 'Channel does not support images');
+        return;
+      }
+      await channel.sendImage(jid, imagePath, caption);
+    },
     registeredGroups: () => registeredGroups,
     registerGroup,
     syncGroupMetadata: (force) => whatsapp.syncGroupMetadata(force),
