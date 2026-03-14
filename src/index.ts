@@ -530,6 +530,7 @@ async function main(): Promise<void> {
       onChatMetadata: (chatJid, timestamp, name) =>
         storeChatMetadata(chatJid, timestamp, name),
       registeredGroups: () => registeredGroups,
+      registerGroup,
     });
     channels.push(discord);
     await discord.connect();

@@ -71,7 +71,7 @@ interface ChatCompletionResponse {
 }
 
 interface ProviderConfig {
-  apiKey: string;
+  apiKey?: string;
   apiUrl: string;
   model: string;
   maxTokens: number;
@@ -466,12 +466,12 @@ function loadProviderConfig(containerInput: ContainerInput): ProviderConfig {
   const model = readConfigValue(containerInput, ['OPENAI_COMPAT_MODEL', 'LLM_MODEL'])
     || 'openapi/claude-4.5-sonnet';
 
-  if (!apiKey) {
-    throw new Error('Missing OPENAI_COMPAT_API_KEY in .env');
+  if (!baseUrl) {
+    throw new Error('Missing OPENAI_COMPAT_BASE_URL (or LLM_BASE_URL) in .env');
   }
 
-  if (!baseUrl) {
-    throw new Error('Missing OPENAI_COMPAT_BASE_URL in .env');
+  if (!apiKey) {
+    log('No API key configured (OPENAI_COMPAT_API_KEY/LLM_API_KEY). Continuing without Authorization header.');
   }
 
   return {
@@ -780,12 +780,16 @@ async function callChatCompletion(
     payload.thinking = { type: providerConfig.thinkingType };
   }
 
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (providerConfig.apiKey) {
+    headers.Authorization = `Bearer ${providerConfig.apiKey}`;
+  }
+
   const response = await fetch(providerConfig.apiUrl, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${providerConfig.apiKey}`,
-    },
+    headers,
     body: JSON.stringify(payload),
   });
 

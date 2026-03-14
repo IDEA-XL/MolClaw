@@ -8,6 +8,7 @@ export interface DiscordChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  registerGroup?: (jid: string, group: RegisteredGroup) => void;
 }
 
 function enableDiscordGlobalWebSocketPath(): void {
@@ -38,7 +39,9 @@ export class DiscordChannel implements Channel {
 
   async connect(): Promise<void> {
     enableDiscordGlobalWebSocketPath();
-    const { Client, Events, GatewayIntentBits } = await import('discord.js');
+    const { Client, Events, GatewayIntentBits, Partials } = await import(
+      'discord.js'
+    );
 
     this.client = new Client({
       intents: [
@@ -47,11 +50,22 @@ export class DiscordChannel implements Channel {
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.DirectMessages,
       ],
+      // Required to receive DM messages reliably in discord.js v14.
+      partials: [Partials.Channel],
     });
 
     this.client.on(Events.MessageCreate, async (message: any) => {
       // Ignore bot messages (including own)
       if (message.author.bot) return;
+
+      logger.info(
+        {
+          channelId: message.channelId,
+          isDm: message.guild === null,
+          authorId: message.author.id,
+        },
+        'Discord MessageCreate received',
+      );
 
       const channelId = message.channelId;
       const chatJid = `dc:${channelId}`;
@@ -137,7 +151,21 @@ export class DiscordChannel implements Channel {
       this.opts.onChatMetadata(chatJid, timestamp, chatName);
 
       // Only deliver full message for registered groups
-      const group = this.opts.registeredGroups()[chatJid];
+      let group = this.opts.registeredGroups()[chatJid];
+      if (!group && message.guild === null && this.opts.registerGroup) {
+        // Auto-register Discord DMs so first contact works out of the box.
+        const dmFolder = `discord-dm-${channelId}`;
+        this.opts.registerGroup(chatJid, {
+          name: chatName,
+          folder: dmFolder,
+          trigger: `@${ASSISTANT_NAME}`,
+          added_at: new Date().toISOString(),
+          requiresTrigger: false,
+        });
+        group = this.opts.registeredGroups()[chatJid];
+        logger.info({ chatJid, folder: dmFolder }, 'Auto-registered Discord DM');
+      }
+
       if (!group) {
         logger.debug(
           { chatJid, chatName },
