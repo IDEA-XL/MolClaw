@@ -14,7 +14,12 @@ import {
 import { readEnvFile } from './env.js';
 import { DiscordChannel } from './channels/discord.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
-import { configureGlobalFetchProxy, getConfiguredProxyUrl, maskProxyUrl } from './proxy.js';
+import {
+  configureGlobalFetchProxy,
+  configureGlobalSocketProxy,
+  getConfiguredProxyUrl,
+  maskProxyUrl,
+} from './proxy.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -494,6 +499,7 @@ async function main(): Promise<void> {
     logger.info({ proxy: maskProxyUrl(proxyUrl) }, 'Using proxy for outbound HTTP');
   }
   configureGlobalFetchProxy();
+  configureGlobalSocketProxy();
 
   const whatsappEnabledRaw =
     process.env.WHATSAPP_ENABLED ?? env.WHATSAPP_ENABLED ?? 'true';

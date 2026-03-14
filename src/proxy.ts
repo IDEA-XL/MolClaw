@@ -1,4 +1,6 @@
 import type { Agent } from 'https';
+import http from 'node:http';
+import https from 'node:https';
 
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { ProxyAgent } from 'proxy-agent';
@@ -16,6 +18,7 @@ const PROXY_ENV_KEYS = [
 let cachedSocketAgent: Agent | undefined;
 let cachedFetchDispatcher: UndiciProxyAgent | undefined;
 let globalFetchProxyConfigured = false;
+let globalSocketProxyConfigured = false;
 
 function firstProxyEnv(): string | undefined {
   for (const key of PROXY_ENV_KEYS) {
@@ -99,4 +102,29 @@ export function configureGlobalFetchProxy(): void {
 
   setGlobalDispatcher(dispatcher);
   globalFetchProxyConfigured = true;
+}
+
+/**
+ * Configure Node's default http(s) global agents to use the proxy (if any).
+ * This is required for libraries that use `http.request`/`https.request`
+ * directly (e.g. WebSocket handshakes via the `ws` package).
+ */
+export function configureGlobalSocketProxy(): void {
+  if (globalSocketProxyConfigured) {
+    return;
+  }
+
+  const agent = createSocketProxyAgent();
+  if (!agent) {
+    return;
+  }
+
+  // `ws` uses `http(s).request()` under the hood. If no per-request agent is
+  // provided, Node falls back to these globals.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (http as any).globalAgent = agent as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (https as any).globalAgent = agent as any;
+
+  globalSocketProxyConfigured = true;
 }
