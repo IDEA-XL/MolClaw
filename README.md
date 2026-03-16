@@ -158,7 +158,7 @@ Note: your bot invite must include `applications.commands` scope for slash comma
 .
 ├── src/                         # orchestrator, channels, queue, dashboard server
 │   ├── channels/                # Discord / WhatsApp adapters
-│   ├── dashboard.ts             # dashboard API + UI (single-file)
+│   ├── dashboard/               # dashboard server, helpers, and UI template
 │   ├── container-runner.ts      # Docker lifecycle + stream parsing
 │   ├── group-queue.ts           # per-group execution queue
 │   ├── db.ts                    # SQLite schema + accessors
