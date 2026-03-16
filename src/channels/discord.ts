@@ -19,6 +19,15 @@ export interface DiscordChannelOpts {
     ok: boolean;
     message: string;
   };
+  handleModelsCommand?: (params: {
+    chatJid: string;
+    action: 'list' | 'show' | 'set';
+    provider?: string;
+    model?: string;
+  }) => {
+    ok: boolean;
+    message: string;
+  };
 }
 
 const SESSION_RESET_SLASH_COMMANDS = [
@@ -39,6 +48,36 @@ const SESSION_RESET_SLASH_COMMANDS = [
 const SESSION_RESET_COMMAND_NAME_SET: Set<string> = new Set(
   SESSION_RESET_SLASH_COMMANDS.map((cmd) => cmd.name),
 );
+
+const MODELS_SLASH_COMMAND = {
+  name: 'models',
+  description: 'List or set provider/model for this chat',
+  options: [
+    {
+      type: 3,
+      name: 'action',
+      description: 'list/show/set',
+      required: false,
+      choices: [
+        { name: 'list', value: 'list' },
+        { name: 'show', value: 'show' },
+        { name: 'set', value: 'set' },
+      ],
+    },
+    {
+      type: 3,
+      name: 'provider',
+      description: 'Provider id (e.g., openrouter)',
+      required: false,
+    },
+    {
+      type: 3,
+      name: 'model',
+      description: 'Model id',
+      required: false,
+    },
+  ],
+} as const;
 
 const DEFAULT_DISCORD_ATTACHMENT_MAX_BYTES = 30 * 1024 * 1024; // 30MB
 const DISCORD_ATTACHMENT_MAX_BYTES = Math.max(
@@ -267,10 +306,13 @@ export class DiscordChannel implements Channel {
 
   private async registerSlashCommands(): Promise<void> {
     if (!this.client || !this.client.isReady()) return;
-    const commands = SESSION_RESET_SLASH_COMMANDS.map((cmd) => ({
-      name: cmd.name,
-      description: cmd.description,
-    }));
+    const commands = [
+      ...SESSION_RESET_SLASH_COMMANDS.map((cmd) => ({
+        name: cmd.name,
+        description: cmd.description,
+      })),
+      MODELS_SLASH_COMMAND,
+    ];
 
     try {
       await this.client.application?.commands.set(commands);
@@ -315,7 +357,10 @@ export class DiscordChannel implements Channel {
     this.client.on(Events.InteractionCreate, async (interaction: any) => {
       if (!interaction?.isChatInputCommand?.()) return;
       const commandName = String(interaction.commandName || '').toLowerCase();
-      if (!SESSION_RESET_COMMAND_NAME_SET.has(commandName)) return;
+      if (
+        !SESSION_RESET_COMMAND_NAME_SET.has(commandName)
+        && commandName !== 'models'
+      ) return;
 
       const channelId = interaction.channelId;
       if (!channelId) return;
@@ -347,6 +392,36 @@ export class DiscordChannel implements Channel {
         } else {
           await interaction.reply({ content, ephemeral: !isDm });
         }
+        return;
+      }
+
+      if (commandName === 'models') {
+        const actionRaw = String(
+          interaction.options?.getString?.('action') || 'list',
+        ).toLowerCase();
+        const action: 'list' | 'show' | 'set' =
+          actionRaw === 'set' ? 'set' : actionRaw === 'show' ? 'show' : 'list';
+        const provider = interaction.options?.getString?.('provider') || undefined;
+        const model = interaction.options?.getString?.('model') || undefined;
+        const result = this.opts.handleModelsCommand
+          ? this.opts.handleModelsCommand({
+            chatJid,
+            action,
+            provider,
+            model,
+          })
+          : { ok: false, message: 'Model management is not configured.' };
+
+        const content = result.message;
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({ content, ephemeral: !isDm });
+        } else {
+          await interaction.reply({ content, ephemeral: !isDm });
+        }
+        logger.info(
+          { chatJid, commandName, action, provider, model, ok: result.ok },
+          'Processed Discord models command',
+        );
         return;
       }
 
@@ -503,7 +578,10 @@ export class DiscordChannel implements Channel {
 
     this.client.on(Events.GuildCreate, async (guild: any) => {
       try {
-        await guild.commands.set(SESSION_RESET_SLASH_COMMANDS);
+        await guild.commands.set([
+          ...SESSION_RESET_SLASH_COMMANDS,
+          MODELS_SLASH_COMMAND,
+        ]);
         logger.info(
           { guildId: guild.id },
           'Registered Discord slash commands for new guild',

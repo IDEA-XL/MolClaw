@@ -32,8 +32,10 @@ import {
   writeTasksSnapshot,
 } from './container-runner.js';
 import {
+  clearGroupModelPreference,
   getAllChats,
   AgentEventInput,
+  getAllGroupModelPreferences,
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
@@ -45,6 +47,7 @@ import {
   setRegisteredGroup,
   setRouterState,
   setSession,
+  setGroupModelPreference,
   insertAgentEvent,
   storeChatMetadata,
   storeMessage,
@@ -67,8 +70,11 @@ let lastTimestamp = '';
 let sessions: Record<string, string> = {};
 let sessionResetVersions: Record<string, number> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
+let groupModelPreferences: Record<string, { provider: string; model: string }> =
+  {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+let runtimeEnv: Record<string, string> = {};
 
 let whatsapp: WhatsAppChannel | null = null;
 const channels: Channel[] = [];
@@ -159,6 +165,7 @@ function loadState(): void {
   }
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
+  groupModelPreferences = getAllGroupModelPreferences();
   logger.info(
     { groupCount: Object.keys(registeredGroups).length },
     'State loaded',
@@ -193,6 +200,291 @@ interface SessionResetResult {
   groupFolder?: string;
   previousSessionId?: string;
   message: string;
+}
+
+interface ModelProviderOption {
+  provider: string;
+  label: string;
+  models: string[];
+  defaultModel: string;
+}
+
+interface ModelCatalog {
+  defaultProvider: string;
+  providers: ModelProviderOption[];
+}
+
+function parseModelList(raw?: string): string[] {
+  if (!raw) return [];
+  const parts = raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return Array.from(new Set(parts));
+}
+
+function firstConfigValue(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function getRuntimeEnvValue(key: string): string | undefined {
+  const value = process.env[key];
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  const fallback = runtimeEnv[key];
+  if (typeof fallback === 'string' && fallback.trim()) return fallback.trim();
+  return undefined;
+}
+
+function buildModelCatalog(): ModelCatalog {
+  const requestedDefault = firstConfigValue(
+    getRuntimeEnvValue('DEFAULT_MODEL_PROVIDER'),
+    getRuntimeEnvValue('MODEL_PROVIDER'),
+  )?.toLowerCase();
+
+  const providers: ModelProviderOption[] = [];
+
+  const openRouterModel = firstConfigValue(
+    getRuntimeEnvValue('OPENROUTER_MODEL'),
+    getRuntimeEnvValue('OPENAI_COMPATIBLE_MODEL'),
+    getRuntimeEnvValue('OPENAI_COMPAT_MODEL'),
+    getRuntimeEnvValue('LLM_MODEL'),
+    'openai/gpt-4.1-mini',
+  ) || 'openai/gpt-4.1-mini';
+  const openRouterModels = Array.from(
+    new Set([
+      ...parseModelList(getRuntimeEnvValue('OPENROUTER_MODELS')),
+      openRouterModel,
+    ]),
+  );
+  const hasOpenRouter =
+    !!firstConfigValue(
+      getRuntimeEnvValue('OPENROUTER_API_KEY'),
+      getRuntimeEnvValue('OPENROUTER_BASE_URL'),
+      getRuntimeEnvValue('OPENROUTER_MODEL'),
+      getRuntimeEnvValue('OPENROUTER_MODELS'),
+    );
+  if (hasOpenRouter) {
+    providers.push({
+      provider: 'openrouter',
+      label: 'OpenRouter',
+      models: openRouterModels,
+      defaultModel: openRouterModel,
+    });
+  }
+
+  const compatModel = firstConfigValue(
+    getRuntimeEnvValue('OPENAI_COMPATIBLE_MODEL'),
+    getRuntimeEnvValue('OPENAI_COMPAT_MODEL'),
+    getRuntimeEnvValue('LLM_MODEL'),
+    'openapi/claude-4.5-sonnet',
+  ) || 'openapi/claude-4.5-sonnet';
+  const compatModels = Array.from(
+    new Set([
+      ...parseModelList(getRuntimeEnvValue('OPENAI_COMPATIBLE_MODELS')),
+      ...parseModelList(getRuntimeEnvValue('OPENAI_COMPAT_MODELS')),
+      ...parseModelList(getRuntimeEnvValue('LLM_MODELS')),
+      compatModel,
+    ]),
+  );
+  const hasCompat =
+    !!firstConfigValue(
+      getRuntimeEnvValue('OPENAI_COMPATIBLE_BASE_URL'),
+      getRuntimeEnvValue('OPENAI_COMPAT_BASE_URL'),
+      getRuntimeEnvValue('LLM_BASE_URL'),
+      getRuntimeEnvValue('OPENAI_COMPATIBLE_MODEL'),
+      getRuntimeEnvValue('OPENAI_COMPAT_MODEL'),
+      getRuntimeEnvValue('LLM_MODEL'),
+    );
+  if (hasCompat || providers.length === 0) {
+    providers.push({
+      provider: 'openai-compatible',
+      label: 'OpenAI-Compatible',
+      models: compatModels,
+      defaultModel: compatModel,
+    });
+  }
+
+  const defaultProvider = providers.some((p) => p.provider === requestedDefault)
+    ? (requestedDefault as string)
+    : providers[0]?.provider || 'openai-compatible';
+
+  return {
+    defaultProvider,
+    providers,
+  };
+}
+
+function getEffectiveModelSelection(groupFolder: string): {
+  provider: string;
+  model: string;
+  source: 'default' | 'override';
+} {
+  const catalog = buildModelCatalog();
+  const override = groupModelPreferences[groupFolder];
+  if (override) {
+    const providerOption = catalog.providers.find(
+      (p) => p.provider === override.provider,
+    );
+    if (providerOption) {
+      const fallbackModel = providerOption.defaultModel;
+      const isKnownModel =
+        providerOption.models.length === 0
+        || providerOption.models.includes(override.model);
+      return {
+        provider: override.provider,
+        model: isKnownModel ? override.model : fallbackModel,
+        source: 'override',
+      };
+    }
+  }
+  const provider =
+    catalog.providers.find((p) => p.provider === catalog.defaultProvider)
+    || catalog.providers[0];
+  return {
+    provider: provider?.provider || catalog.defaultProvider,
+    model: provider?.defaultModel || '',
+    source: 'default',
+  };
+}
+
+function getCurrentSelectionText(groupFolder: string): string {
+  const effective = getEffectiveModelSelection(groupFolder);
+  return `${effective.provider} / ${effective.model || '(unset)'} (${effective.source})`;
+}
+
+function clearInvalidModelPreference(groupFolder: string): void {
+  const catalog = buildModelCatalog();
+  const override = groupModelPreferences[groupFolder];
+  if (!override) return;
+  const providerOption = catalog.providers.find(
+    (p) => p.provider === override.provider,
+  );
+  if (!providerOption) {
+    delete groupModelPreferences[groupFolder];
+    clearGroupModelPreference(groupFolder);
+    return;
+  }
+  if (
+    providerOption.models.length > 0
+    && !providerOption.models.includes(override.model)
+  ) {
+    groupModelPreferences[groupFolder] = {
+      provider: override.provider,
+      model: providerOption.defaultModel,
+    };
+    setGroupModelPreference(groupFolder, groupModelPreferences[groupFolder]);
+  }
+}
+
+function getEffectiveModelSelectionWithCleanup(groupFolder: string): {
+  provider: string;
+  model: string;
+  source: 'default' | 'override';
+} {
+  clearInvalidModelPreference(groupFolder);
+  return getEffectiveModelSelection(groupFolder);
+}
+
+function renderModelCatalogText(groupFolder: string): string {
+  const catalog = buildModelCatalog();
+  if (catalog.providers.length === 0) {
+    return 'No available model providers found. Please configure provider env vars first.';
+  }
+  const effective = getEffectiveModelSelectionWithCleanup(groupFolder);
+  const lines: string[] = [];
+  lines.push('Available model providers and models:');
+  lines.push('');
+  for (const provider of catalog.providers) {
+    const isDefault = provider.provider === catalog.defaultProvider;
+    const isActive = provider.provider === effective.provider;
+    lines.push(
+      `- ${provider.label} (${provider.provider})${isDefault ? ' [default]' : ''}${isActive ? ' [active]' : ''}`,
+    );
+    if (provider.models.length > 0) {
+      const preview = provider.models.slice(0, 12).join(', ');
+      const suffix = provider.models.length > 12
+        ? ` ...(+${provider.models.length - 12})`
+        : '';
+      lines.push(`  models: ${preview}${suffix}`);
+    } else {
+      lines.push('  models: (none configured)');
+    }
+  }
+  lines.push('');
+  lines.push(
+    `Current for this chat: ${getCurrentSelectionText(groupFolder)}`,
+  );
+  lines.push('Use: /models action:set provider:<id> model:<model>');
+  return lines.join('\n');
+}
+
+function setModelSelectionForChat(
+  chatJid: string,
+  provider: string,
+  model?: string,
+): { ok: boolean; message: string } {
+  const group = registeredGroups[chatJid];
+  if (!group) {
+    return { ok: false, message: `Group ${chatJid} is not registered.` };
+  }
+  const normalizedProvider = provider.trim().toLowerCase();
+  const catalog = buildModelCatalog();
+  const providerOption = catalog.providers.find(
+    (p) => p.provider === normalizedProvider,
+  );
+  if (!providerOption) {
+    return {
+      ok: false,
+      message: `Unknown provider "${provider}". Run /models action:list to see options.`,
+    };
+  }
+
+  const selectedModel = (model || '').trim() || providerOption.defaultModel;
+  if (!selectedModel) {
+    return {
+      ok: false,
+      message: `No model configured for provider ${normalizedProvider}.`,
+    };
+  }
+
+  if (
+    providerOption.models.length > 0
+    && !providerOption.models.includes(selectedModel)
+  ) {
+    return {
+      ok: false,
+      message: `Model "${selectedModel}" is not in configured list for ${normalizedProvider}.`,
+    };
+  }
+
+  groupModelPreferences[group.folder] = {
+    provider: normalizedProvider,
+    model: selectedModel,
+  };
+  setGroupModelPreference(group.folder, {
+    provider: normalizedProvider,
+    model: selectedModel,
+  });
+
+  logger.info(
+    {
+      chatJid,
+      groupFolder: group.folder,
+      provider: normalizedProvider,
+      model: selectedModel,
+    },
+    'Updated model provider selection',
+  );
+
+  return {
+    ok: true,
+    message: `Updated model for this chat: ${normalizedProvider} / ${selectedModel}`,
+  };
 }
 
 const NEW_SESSION_COMMANDS = new Set([
@@ -493,6 +785,16 @@ async function runAgent(
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
   const runSessionVersion = sessionResetVersions[group.folder] || 0;
+  const modelSelection = getEffectiveModelSelectionWithCleanup(group.folder);
+  logger.debug(
+    {
+      group: group.name,
+      provider: modelSelection.provider,
+      model: modelSelection.model,
+      source: modelSelection.source,
+    },
+    'Using model selection for run',
+  );
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -551,6 +853,10 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
+        providerOverride: {
+          provider: modelSelection.provider,
+          model: modelSelection.model,
+        },
       },
       (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
@@ -798,6 +1104,22 @@ async function main(): Promise<void> {
   const env = readEnvFile([
     'DISCORD_BOT_TOKEN',
     'WHATSAPP_ENABLED',
+    'DEFAULT_MODEL_PROVIDER',
+    'MODEL_PROVIDER',
+    'OPENROUTER_API_KEY',
+    'OPENROUTER_BASE_URL',
+    'OPENROUTER_MODEL',
+    'OPENROUTER_MODELS',
+    'OPENAI_COMPATIBLE_API_KEY',
+    'OPENAI_COMPATIBLE_BASE_URL',
+    'OPENAI_COMPATIBLE_MODEL',
+    'OPENAI_COMPATIBLE_MODELS',
+    'OPENAI_COMPAT_BASE_URL',
+    'OPENAI_COMPAT_MODEL',
+    'OPENAI_COMPAT_MODELS',
+    'LLM_BASE_URL',
+    'LLM_MODEL',
+    'LLM_MODELS',
     'HTTPS_PROXY',
     'https_proxy',
     'HTTP_PROXY',
@@ -809,11 +1131,25 @@ async function main(): Promise<void> {
     'DASHBOARD_PORT',
     'DASHBOARD_TOKEN',
   ]);
+  runtimeEnv = { ...env };
 
-  // Allow putting proxy vars in `.env` (without exporting them in the shell).
-  // `proxy.ts` reads from process.env, and discord.js uses undici which
-  // respects undici's global dispatcher.
+  // Allow putting provider/proxy vars in `.env` (without exporting them in shell).
+  // Provider/model discovery and proxy setup read from process.env at runtime.
   for (const key of [
+    'DEFAULT_MODEL_PROVIDER',
+    'MODEL_PROVIDER',
+    'OPENROUTER_BASE_URL',
+    'OPENROUTER_MODEL',
+    'OPENROUTER_MODELS',
+    'OPENAI_COMPATIBLE_BASE_URL',
+    'OPENAI_COMPATIBLE_MODEL',
+    'OPENAI_COMPATIBLE_MODELS',
+    'OPENAI_COMPAT_BASE_URL',
+    'OPENAI_COMPAT_MODEL',
+    'OPENAI_COMPAT_MODELS',
+    'LLM_BASE_URL',
+    'LLM_MODEL',
+    'LLM_MODELS',
     'HTTPS_PROXY',
     'https_proxy',
     'HTTP_PROXY',
@@ -864,6 +1200,27 @@ async function main(): Promise<void> {
       registeredGroups: () => registeredGroups,
       registerGroup,
       resetSession: (chatJid, source) => resetChatSession(chatJid, source),
+      handleModelsCommand: ({ chatJid, action, provider, model }) => {
+        const group = registeredGroups[chatJid];
+        if (!group) {
+          return { ok: false, message: `Group ${chatJid} is not registered.` };
+        }
+
+        if (action === 'set') {
+          if (!provider) {
+            return {
+              ok: false,
+              message: 'Missing provider. Usage: /models action:set provider:<id> model:<model>',
+            };
+          }
+          return setModelSelectionForChat(chatJid, provider, model);
+        }
+
+        return {
+          ok: true,
+          message: renderModelCatalogText(group.folder),
+        };
+      },
     });
     channels.push(discord);
     await discord.connect();

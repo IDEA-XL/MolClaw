@@ -22,6 +22,10 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  providerOverride?: {
+    provider: string;
+    model: string;
+  };
   secrets?: Record<string, string>;
 }
 
@@ -266,6 +270,18 @@ const INLINE_IMAGE_MAX_COUNT = Math.max(
   ) || DEFAULT_INLINE_IMAGE_MAX_COUNT,
 );
 const TOOL_ENV_VARS = [
+  'MODEL_PROVIDER',
+  'OPENROUTER_API_KEY',
+  'OPENROUTER_BASE_URL',
+  'OPENROUTER_MODEL',
+  'OPENROUTER_MULTIMODAL',
+  'OPENAI_COMPATIBLE_API_KEY',
+  'OPENAI_COMPATIBLE_BASE_URL',
+  'OPENAI_COMPATIBLE_MODEL',
+  'OPENAI_COMPATIBLE_MAX_TOKENS',
+  'OPENAI_COMPATIBLE_TEMPERATURE',
+  'OPENAI_COMPATIBLE_THINKING_TYPE',
+  'OPENAI_COMPATIBLE_MULTIMODAL',
   'OPENAI_COMPAT_API_KEY',
   'OPENAI_COMPAT_BASE_URL',
   'OPENAI_COMPAT_MODEL',
@@ -723,49 +739,160 @@ function applyRuntimeEnv(containerInput: ContainerInput): void {
 }
 
 function loadProviderConfig(containerInput: ContainerInput): ProviderConfig {
-  const apiKey = readConfigValue(containerInput, ['OPENAI_COMPAT_API_KEY', 'LLM_API_KEY']);
-  const baseUrl = readConfigValue(containerInput, ['OPENAI_COMPAT_BASE_URL', 'LLM_BASE_URL']);
-  const model = readConfigValue(containerInput, ['OPENAI_COMPAT_MODEL', 'LLM_MODEL'])
-    || 'openapi/claude-4.5-sonnet';
+  const requestedProviderRaw = (
+    containerInput.providerOverride?.provider
+    || readConfigValue(containerInput, ['MODEL_PROVIDER'])
+    || ''
+  ).trim().toLowerCase();
+  const requestedProvider =
+    requestedProviderRaw === 'openrouter'
+      ? 'openrouter'
+      : requestedProviderRaw === 'openai-compatible'
+        || requestedProviderRaw === 'openai_compatible'
+        ? 'openai-compatible'
+        : '';
+
+  if (requestedProviderRaw === 'anthropic') {
+    log('MODEL_PROVIDER=anthropic is not supported in this runner; falling back to OpenAI-compatible mode.');
+  }
+
+  const hasOpenRouterConfig = !!readConfigValue(containerInput, [
+    'OPENROUTER_API_KEY',
+    'OPENROUTER_BASE_URL',
+    'OPENROUTER_MODEL',
+  ]);
+  const selectedProvider =
+    requestedProvider
+    || (hasOpenRouterConfig ? 'openrouter' : 'openai-compatible');
+
+  let apiKey: string | undefined;
+  let baseUrl: string | undefined;
+  let model: string | undefined;
+  let maxTokensRaw: string | undefined;
+  let temperatureRaw: string | undefined;
+  let thinkingTypeRaw: string | undefined;
+  let multimodalConfigRaw: string | undefined;
+
+  if (selectedProvider === 'openrouter') {
+    apiKey = readConfigValue(containerInput, [
+      'OPENROUTER_API_KEY',
+      'OPENAI_COMPATIBLE_API_KEY',
+      'OPENAI_COMPAT_API_KEY',
+      'LLM_API_KEY',
+    ]);
+    baseUrl = readConfigValue(containerInput, ['OPENROUTER_BASE_URL'])
+      || 'https://openrouter.ai/api/v1';
+    model =
+      (containerInput.providerOverride?.model || '').trim()
+      || readConfigValue(containerInput, ['OPENROUTER_MODEL'])
+      || 'openai/gpt-4.1-mini';
+    maxTokensRaw = readConfigValue(containerInput, [
+      'OPENROUTER_MAX_TOKENS',
+      'OPENAI_COMPATIBLE_MAX_TOKENS',
+      'OPENAI_COMPAT_MAX_TOKENS',
+      'LLM_MAX_TOKENS',
+    ]);
+    temperatureRaw = readConfigValue(containerInput, [
+      'OPENROUTER_TEMPERATURE',
+      'OPENAI_COMPATIBLE_TEMPERATURE',
+      'OPENAI_COMPAT_TEMPERATURE',
+      'LLM_TEMPERATURE',
+    ]);
+    thinkingTypeRaw = readConfigValue(containerInput, [
+      'OPENROUTER_THINKING_TYPE',
+      'OPENAI_COMPATIBLE_THINKING_TYPE',
+      'OPENAI_COMPAT_THINKING_TYPE',
+      'LLM_THINKING_TYPE',
+    ]);
+    multimodalConfigRaw = readConfigValue(containerInput, [
+      'OPENROUTER_MULTIMODAL',
+      'OPENAI_COMPATIBLE_MULTIMODAL',
+      'OPENAI_COMPAT_MULTIMODAL',
+      'LLM_MULTIMODAL',
+      'OPENAI_COMPATIBLE_SUPPORTS_IMAGE',
+      'OPENAI_COMPAT_SUPPORTS_IMAGE',
+      'LLM_SUPPORTS_IMAGE',
+    ]);
+  } else {
+    apiKey = readConfigValue(containerInput, [
+      'OPENAI_COMPATIBLE_API_KEY',
+      'OPENAI_COMPAT_API_KEY',
+      'LLM_API_KEY',
+      'OPENROUTER_API_KEY',
+    ]);
+    baseUrl = readConfigValue(containerInput, [
+      'OPENAI_COMPATIBLE_BASE_URL',
+      'OPENAI_COMPAT_BASE_URL',
+      'LLM_BASE_URL',
+    ]);
+    model =
+      (containerInput.providerOverride?.model || '').trim()
+      || readConfigValue(containerInput, [
+        'OPENAI_COMPATIBLE_MODEL',
+        'OPENAI_COMPAT_MODEL',
+        'LLM_MODEL',
+      ])
+      || 'openapi/claude-4.5-sonnet';
+    maxTokensRaw = readConfigValue(containerInput, [
+      'OPENAI_COMPATIBLE_MAX_TOKENS',
+      'OPENAI_COMPAT_MAX_TOKENS',
+      'LLM_MAX_TOKENS',
+      'OPENROUTER_MAX_TOKENS',
+    ]);
+    temperatureRaw = readConfigValue(containerInput, [
+      'OPENAI_COMPATIBLE_TEMPERATURE',
+      'OPENAI_COMPAT_TEMPERATURE',
+      'LLM_TEMPERATURE',
+      'OPENROUTER_TEMPERATURE',
+    ]);
+    thinkingTypeRaw = readConfigValue(containerInput, [
+      'OPENAI_COMPATIBLE_THINKING_TYPE',
+      'OPENAI_COMPAT_THINKING_TYPE',
+      'LLM_THINKING_TYPE',
+      'OPENROUTER_THINKING_TYPE',
+    ]);
+    multimodalConfigRaw = readConfigValue(containerInput, [
+      'OPENAI_COMPATIBLE_MULTIMODAL',
+      'OPENAI_COMPAT_MULTIMODAL',
+      'LLM_MULTIMODAL',
+      'OPENROUTER_MULTIMODAL',
+      'OPENAI_COMPATIBLE_SUPPORTS_IMAGE',
+      'OPENAI_COMPAT_SUPPORTS_IMAGE',
+      'LLM_SUPPORTS_IMAGE',
+    ]);
+  }
 
   if (!baseUrl) {
-    throw new Error('Missing OPENAI_COMPAT_BASE_URL (or LLM_BASE_URL) in .env');
+    throw new Error(
+      'Missing provider base URL. Set OPENROUTER_BASE_URL or OPENAI_COMPATIBLE_BASE_URL or OPENAI_COMPAT_BASE_URL (or LLM_BASE_URL).',
+    );
   }
 
   if (!apiKey) {
-    log('No API key configured (OPENAI_COMPAT_API_KEY/LLM_API_KEY). Continuing without Authorization header.');
+    log(
+      'No API key configured (OPENROUTER_API_KEY / OPENAI_COMPATIBLE_API_KEY / OPENAI_COMPAT_API_KEY / LLM_API_KEY). Continuing without Authorization header.',
+    );
   }
 
-  const multimodalConfigRaw = readConfigValue(containerInput, [
-    'OPENAI_COMPAT_MULTIMODAL',
-    'LLM_MULTIMODAL',
-    'OPENAI_COMPAT_SUPPORTS_IMAGE',
-    'LLM_SUPPORTS_IMAGE',
-  ]);
+  const finalModel = model || 'openai/gpt-4.1-mini';
   const multimodalConfigured = parseBooleanConfig(multimodalConfigRaw);
-  const multimodalInferred = inferImageSupportFromModel(model);
+  const multimodalInferred = inferImageSupportFromModel(finalModel);
   const supportsImageInput =
     multimodalConfigured !== null ? multimodalConfigured : multimodalInferred;
   const imageSupportReason =
     multimodalConfigured !== null
       ? `configured by env (${multimodalConfigRaw})`
       : multimodalInferred !== null
-        ? `inferred from model name (${model})`
-        : `unknown for model (${model})`;
+        ? `inferred from model name (${finalModel})`
+        : `unknown for model (${finalModel})`;
 
   return {
     apiKey,
     apiUrl: normalizeBaseUrl(baseUrl),
-    model,
-    maxTokens: parseNumberConfig(
-      readConfigValue(containerInput, ['OPENAI_COMPAT_MAX_TOKENS', 'LLM_MAX_TOKENS']),
-      4096,
-    ),
-    temperature: parseNumberConfig(
-      readConfigValue(containerInput, ['OPENAI_COMPAT_TEMPERATURE', 'LLM_TEMPERATURE']),
-      0.2,
-    ),
-    thinkingType: readConfigValue(containerInput, ['OPENAI_COMPAT_THINKING_TYPE', 'LLM_THINKING_TYPE']),
+    model: finalModel,
+    maxTokens: parseNumberConfig(maxTokensRaw, 4096),
+    temperature: parseNumberConfig(temperatureRaw, 0.2),
+    thinkingType: thinkingTypeRaw,
     supportsImageInput,
     imageSupportReason,
   };

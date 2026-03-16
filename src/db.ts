@@ -28,6 +28,11 @@ export interface AgentEventInput {
   payload?: Record<string, unknown>;
 }
 
+export interface GroupModelPreference {
+  provider: string;
+  model: string;
+}
+
 function createSchema(database: Database.Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS chats (
@@ -83,6 +88,12 @@ function createSchema(database: Database.Database): void {
     CREATE TABLE IF NOT EXISTS sessions (
       group_folder TEXT PRIMARY KEY,
       session_id TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS group_model_preferences (
+      group_folder TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS registered_groups (
       jid TEXT PRIMARY KEY,
@@ -600,6 +611,56 @@ export function getAllSessions(): Record<string, string> {
   const result: Record<string, string> = {};
   for (const row of rows) {
     result[row.group_folder] = row.session_id;
+  }
+  return result;
+}
+
+export function getGroupModelPreference(
+  groupFolder: string,
+): GroupModelPreference | undefined {
+  const row = db
+    .prepare(
+      'SELECT provider, model FROM group_model_preferences WHERE group_folder = ?',
+    )
+    .get(groupFolder) as { provider: string; model: string } | undefined;
+  if (!row) return undefined;
+  return {
+    provider: row.provider,
+    model: row.model,
+  };
+}
+
+export function setGroupModelPreference(
+  groupFolder: string,
+  preference: GroupModelPreference,
+): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO group_model_preferences (group_folder, provider, model, updated_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(
+    groupFolder,
+    preference.provider,
+    preference.model,
+    new Date().toISOString(),
+  );
+}
+
+export function clearGroupModelPreference(groupFolder: string): void {
+  db.prepare(
+    'DELETE FROM group_model_preferences WHERE group_folder = ?',
+  ).run(groupFolder);
+}
+
+export function getAllGroupModelPreferences(): Record<string, GroupModelPreference> {
+  const rows = db
+    .prepare('SELECT group_folder, provider, model FROM group_model_preferences')
+    .all() as Array<{ group_folder: string; provider: string; model: string }>;
+  const result: Record<string, GroupModelPreference> = {};
+  for (const row of rows) {
+    result[row.group_folder] = {
+      provider: row.provider,
+      model: row.model,
+    };
   }
   return result;
 }

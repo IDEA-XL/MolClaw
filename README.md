@@ -68,6 +68,23 @@ OPENAI_COMPAT_MODEL=<your-model>
 OPENAI_COMPAT_API_KEY=<your-key>
 ```
 
+OpenRouter example:
+
+```env
+MODEL_PROVIDER=openrouter
+OPENROUTER_API_KEY=<your-openrouter-key>
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL=openai/gpt-4.1-mini
+```
+
+Optional model catalog / default provider:
+
+```env
+DEFAULT_MODEL_PROVIDER=openrouter
+OPENROUTER_MODELS=openai/gpt-4.1-mini,anthropic/claude-3.7-sonnet
+OPENAI_COMPATIBLE_MODELS=<model-a>,<model-b>
+```
+
 Optional common settings:
 
 ```env
@@ -111,6 +128,9 @@ Dashboard: http://127.0.0.1:8787/
   - `/newsession`
   - `/reset_session`
   - `/reset`
+- Manage model provider/model for current chat:
+  - `/models` (list/show)
+  - `/models action:set provider:<id> model:<model>`
 
 Note: your bot invite must include `applications.commands` scope for slash commands.
 

@@ -40,6 +40,10 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  providerOverride?: {
+    provider: string;
+    model: string;
+  };
   secrets?: Record<string, string>;
 }
 
@@ -227,12 +231,32 @@ function readSecrets(): Record<string, string> {
   if (!fs.existsSync(envFile)) return {};
 
   const allowedVars = [
+    'MODEL_PROVIDER',
+    'OPENROUTER_API_KEY',
+    'OPENROUTER_BASE_URL',
+    'OPENROUTER_MODEL',
+    'OPENROUTER_MAX_TOKENS',
+    'OPENROUTER_TEMPERATURE',
+    'OPENROUTER_THINKING_TYPE',
+    'OPENROUTER_MULTIMODAL',
+    'OPENAI_COMPATIBLE_API_KEY',
+    'OPENAI_COMPATIBLE_BASE_URL',
+    'OPENAI_COMPATIBLE_MODEL',
+    'OPENAI_COMPATIBLE_MAX_TOKENS',
+    'OPENAI_COMPATIBLE_TEMPERATURE',
+    'OPENAI_COMPATIBLE_THINKING_TYPE',
+    'OPENAI_COMPATIBLE_MULTIMODAL',
+    'OPENAI_COMPATIBLE_SUPPORTS_IMAGE',
     'OPENAI_COMPAT_BASE_URL',
     'OPENAI_COMPAT_API_KEY',
     'OPENAI_COMPAT_MODEL',
     'OPENAI_COMPAT_MAX_TOKENS',
     'OPENAI_COMPAT_TEMPERATURE',
     'OPENAI_COMPAT_THINKING_TYPE',
+    'OPENAI_COMPAT_MULTIMODAL',
+    'OPENAI_COMPAT_SUPPORTS_IMAGE',
+    'OPENAI_COMPAT_INLINE_IMAGE_MAX_BYTES',
+    'OPENAI_COMPAT_INLINE_IMAGE_MAX_COUNT',
     'LLM_BASE_URL',
     'LLM_API_KEY',
     'LLM_MODEL',
