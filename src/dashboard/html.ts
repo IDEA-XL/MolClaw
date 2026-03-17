@@ -1271,7 +1271,42 @@ export function getDashboardHtml(): string {
     function renderSkillTraceBody(payload, foldKeyPrefix) {
       const trace = Array.isArray(payload.claudeSkillTrace) ? payload.claudeSkillTrace : [];
       const parseErrors = Array.isArray(payload.parseErrors) ? payload.parseErrors : [];
+      const runtime = payload && typeof payload === 'object' ? payload.claudeSkillRuntime : null;
+      const conformance = payload && typeof payload === 'object' ? payload.claudeSkillConformance : null;
       const keyPrefix = foldKeyPrefix || 'skill-trace';
+
+      if (conformance && Array.isArray(conformance.loadedSkillNames) && conformance.loadedSkillNames.length > 0) {
+        const summary = [
+          'status=' + (conformance.status || 'unknown'),
+          'loaded=' + conformance.loadedSkillNames.join(', '),
+          conformance.firstPostLoadToolName ? ('first_post_load_tool=' + conformance.firstPostLoadToolName) : '',
+          Array.isArray(conformance.referencedSkillNames) && conformance.referencedSkillNames.length > 0
+            ? ('artifact_refs=' + conformance.referencedSkillNames.join(', '))
+            : 'artifact_refs=none',
+          conformance.finalResponseProduced ? 'final_response=true' : '',
+        ].filter(Boolean).join(' | ');
+
+        const detailRows = [
+          ['status', conformance.status || '-'],
+          ['loaded skills', Array.isArray(conformance.loadedSkillNames) ? conformance.loadedSkillNames.join(', ') : '-'],
+          ['load rounds', Array.isArray(conformance.loadRounds) ? conformance.loadRounds.join(', ') : '-'],
+          ['skill tool calls', conformance.skillToolCallCount == null ? '-' : String(conformance.skillToolCallCount)],
+          ['first post-load tool', conformance.firstPostLoadToolName || '-'],
+          ['post-load tools', Array.isArray(conformance.postLoadToolNames) && conformance.postLoadToolNames.length > 0 ? conformance.postLoadToolNames.join(', ') : '-'],
+          ['artifact refs', Array.isArray(conformance.referencedPaths) && conformance.referencedPaths.length > 0 ? conformance.referencedPaths.join('\\n') : '-'],
+        ].map((entry) => '<div class="kv-item">'
+            + '<div class="k">' + esc(entry[0]) + '</div>'
+            + '<div class="v">' + renderTextWithCodeBlocks(String(entry[1])) + '</div>'
+            + '</div>').join('');
+
+        return ''
+          + '<div class="msg-body">' + esc(summary) + '</div>'
+          + renderFoldSummary(
+            'view skill conformance trace',
+            '<div class="kv-list">' + detailRows + '</div>',
+            keyPrefix + ':conformance',
+          );
+      }
 
       if (trace.length > 0) {
         const summary = trace
@@ -1316,6 +1351,14 @@ export function getDashboardHtml(): string {
             renderCodeBlock(parseErrors.map((entry) => entry.filePath + ': ' + entry.message).join('\\n'), ''),
             keyPrefix + ':errors',
           );
+      }
+
+      if (runtime) {
+        return '<div class="msg-body muted">'
+          + esc('skill cache=' + (runtime.cacheStatus || 'n/a')
+            + ' · available=' + (runtime.availableSkillCount != null ? runtime.availableSkillCount : runtime.totalSkills || 0)
+            + ' · explicit=' + (runtime.explicitInvocationCount || 0))
+          + '</div>';
       }
 
       return renderTextWithCodeBlocks(payload.contentPreview || '');
@@ -1445,12 +1488,22 @@ export function getDashboardHtml(): string {
           continue;
         }
 
-        if (e.eventType === 'context' && (p.message === 'claude_skills_selected' || p.message === 'claude_skills_parse_errors')) {
+        const hasTrace = Array.isArray(p.claudeSkillTrace) && p.claudeSkillTrace.length > 0;
+        const hasParseErrors = Array.isArray(p.parseErrors) && p.parseErrors.length > 0;
+        const hasConformance = p.claudeSkillConformance && Array.isArray(p.claudeSkillConformance.loadedSkillNames) && p.claudeSkillConformance.loadedSkillNames.length > 0;
+        if (
+          e.eventType === 'context'
+          && (p.message === 'claude_skills_selected' || p.message === 'claude_skills_parse_errors' || p.message === 'claude_skills_conformance')
+          && (hasTrace || hasParseErrors || hasConformance)
+        ) {
           items.push({
             key: 'e-' + e.id,
             ts: e.ts,
             kind: 'skill-trace',
-            role: p.message === 'claude_skills_parse_errors' ? 'skill parse' : 'skill routing',
+            role:
+              p.message === 'claude_skills_parse_errors'
+                ? 'skill parse'
+                : (p.message === 'claude_skills_conformance' ? 'skill conformance' : 'skill routing'),
             meta: p.round != null ? ('round=' + p.round) : 'context',
             body: typeof p.contentPreview === 'string' ? p.contentPreview : '',
             payload: p,
@@ -1582,9 +1635,13 @@ export function getDashboardHtml(): string {
       for (let i = events.length - 1; i >= 0; i -= 1) {
         const e = events[i];
         const p = getEventPayload(e);
+        const hasTrace = Array.isArray(p.claudeSkillTrace) && p.claudeSkillTrace.length > 0;
+        const hasParseErrors = Array.isArray(p.parseErrors) && p.parseErrors.length > 0;
+        const hasConformance = p.claudeSkillConformance && Array.isArray(p.claudeSkillConformance.loadedSkillNames) && p.claudeSkillConformance.loadedSkillNames.length > 0;
         if (
           e.eventType === 'context'
-          && (p.message === 'claude_skills_selected' || p.message === 'claude_skills_parse_errors')
+          && (p.message === 'claude_skills_selected' || p.message === 'claude_skills_parse_errors' || p.message === 'claude_skills_conformance')
+          && (hasTrace || hasParseErrors || hasConformance)
         ) {
           return e;
         }

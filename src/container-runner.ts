@@ -103,6 +103,36 @@ export interface AgentProgressEvent {
     filePath: string;
     message: string;
   }>;
+  claudeSkillRuntime?: {
+    skillsBaseDir: string;
+    cacheStatus: 'cold' | 'hit' | 'refresh';
+    snapshotKey: string;
+    totalSkills: number;
+    parseErrorCount: number;
+    lastRefreshAt: string;
+    availableSkillCount?: number;
+    explicitInvocationCount?: number;
+    materializedSkillCount?: number;
+    materializedSkillNames?: string[];
+  };
+  claudeSkillConformance?: {
+    status:
+      | 'none'
+      | 'loaded'
+      | 'post_load_tools_seen'
+      | 'referenced_skill_artifacts'
+      | 'final_response_after_skill';
+    activeSkillNames: string[];
+    loadedSkillNames: string[];
+    skillToolCallCount: number;
+    loadRounds: number[];
+    firstPostLoadToolName?: string;
+    postLoadToolNames?: string[];
+    referencedSkillNames?: string[];
+    referencedSkillBaseDirs?: string[];
+    referencedPaths?: string[];
+    finalResponseProduced?: boolean;
+  };
   timestamp: string;
 }
 

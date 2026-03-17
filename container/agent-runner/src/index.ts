@@ -15,13 +15,11 @@ import { promisify } from 'util';
 
 import { CronExpressionParser } from 'cron-parser';
 import {
-  buildClaudeSkillToolDefinition,
-  discoverClaudeSkills,
+  ClaudeSkillManager,
   findClaudeSkill,
   renderClaudeSkillForContext,
   renderClaudeSkillInvocationHint,
   renderClaudeSkillLoadedReminder,
-  resolveExplicitClaudeSkillCandidates,
   type ClaudeSkillCandidate,
   type ClaudeSkillRegistry,
   type ClaudeSkillInvocationHint,
@@ -101,6 +99,36 @@ interface AgentProgressEvent {
     filePath: string;
     message: string;
   }>;
+  claudeSkillRuntime?: {
+    skillsBaseDir: string;
+    cacheStatus: 'cold' | 'hit' | 'refresh';
+    snapshotKey: string;
+    totalSkills: number;
+    parseErrorCount: number;
+    lastRefreshAt: string;
+    availableSkillCount?: number;
+    explicitInvocationCount?: number;
+    materializedSkillCount?: number;
+    materializedSkillNames?: string[];
+  };
+  claudeSkillConformance?: {
+    status:
+      | 'none'
+      | 'loaded'
+      | 'post_load_tools_seen'
+      | 'referenced_skill_artifacts'
+      | 'final_response_after_skill';
+    activeSkillNames: string[];
+    loadedSkillNames: string[];
+    skillToolCallCount: number;
+    loadRounds: number[];
+    firstPostLoadToolName?: string;
+    postLoadToolNames?: string[];
+    referencedSkillNames?: string[];
+    referencedSkillBaseDirs?: string[];
+    referencedPaths?: string[];
+    finalResponseProduced?: boolean;
+  };
   timestamp: string;
 }
 
@@ -613,6 +641,24 @@ interface ToolExecutionResult {
   success: boolean;
 }
 
+interface ActiveLoadedSkill {
+  name: string;
+  baseDir: string;
+  loadedRound: number;
+}
+
+interface SkillConformanceState {
+  activeSkills: Map<string, ActiveLoadedSkill>;
+  loadedSkillNames: Set<string>;
+  skillToolCallCount: number;
+  loadRounds: number[];
+  firstPostLoadToolName?: string;
+  postLoadToolNames: string[];
+  referencedSkillNames: Set<string>;
+  referencedSkillBaseDirs: Set<string>;
+  referencedPaths: Set<string>;
+}
+
 async function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -1027,6 +1073,137 @@ function ensureAllowedPath(
     throw new Error(`Path is outside allowed roots: ${resolved}`);
   }
   return resolved;
+}
+
+function collectStringLeaves(value: unknown): string[] {
+  if (typeof value === 'string') {
+    return [value];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => collectStringLeaves(entry));
+  }
+  if (value && typeof value === 'object') {
+    return Object.values(value as Record<string, unknown>)
+      .flatMap((entry) => collectStringLeaves(entry));
+  }
+  return [];
+}
+
+function normalizePathLikeString(value: string): string {
+  return value.replace(/\\/g, '/');
+}
+
+function createSkillConformanceState(): SkillConformanceState {
+  return {
+    activeSkills: new Map(),
+    loadedSkillNames: new Set(),
+    skillToolCallCount: 0,
+    loadRounds: [],
+    postLoadToolNames: [],
+    referencedSkillNames: new Set(),
+    referencedSkillBaseDirs: new Set(),
+    referencedPaths: new Set(),
+  };
+}
+
+function buildSkillConformanceSnapshot(
+  state: SkillConformanceState,
+  finalResponseProduced = false,
+): AgentProgressEvent['claudeSkillConformance'] | null {
+  if (state.loadedSkillNames.size === 0 && state.activeSkills.size === 0) {
+    return null;
+  }
+
+  let status: NonNullable<AgentProgressEvent['claudeSkillConformance']>['status'] = 'loaded';
+  if (state.referencedPaths.size > 0) {
+    status = finalResponseProduced ? 'final_response_after_skill' : 'referenced_skill_artifacts';
+  } else if (state.postLoadToolNames.length > 0) {
+    status = 'post_load_tools_seen';
+  } else if (finalResponseProduced) {
+    status = 'final_response_after_skill';
+  }
+
+  return {
+    status,
+    activeSkillNames: Array.from(state.activeSkills.values()).map((entry) => entry.name),
+    loadedSkillNames: Array.from(state.loadedSkillNames.values()),
+    skillToolCallCount: state.skillToolCallCount,
+    loadRounds: [...state.loadRounds],
+    firstPostLoadToolName: state.firstPostLoadToolName,
+    postLoadToolNames: [...state.postLoadToolNames],
+    referencedSkillNames: Array.from(state.referencedSkillNames.values()),
+    referencedSkillBaseDirs: Array.from(state.referencedSkillBaseDirs.values()),
+    referencedPaths: Array.from(state.referencedPaths.values()),
+    finalResponseProduced,
+  };
+}
+
+function buildSkillConformancePreview(
+  snapshot: NonNullable<AgentProgressEvent['claudeSkillConformance']>,
+): string {
+  return [
+    `status=${snapshot.status}`,
+    `loaded=${snapshot.loadedSkillNames.join(', ') || 'none'}`,
+    snapshot.firstPostLoadToolName ? `first_post_load_tool=${snapshot.firstPostLoadToolName}` : '',
+    snapshot.referencedSkillNames && snapshot.referencedSkillNames.length > 0
+      ? `artifact_refs=${snapshot.referencedSkillNames.join(', ')}`
+      : 'artifact_refs=none',
+  ]
+    .filter(Boolean)
+    .join(' | ');
+}
+
+function updateSkillConformanceFromTool(
+  state: SkillConformanceState,
+  toolName: string,
+  toolArgs: Record<string, unknown>,
+  roundNumber: number,
+  registry: ClaudeSkillRegistry,
+  toolSucceeded: boolean,
+): void {
+  if (isSkillToolName(toolName)) {
+    if (!toolSucceeded) {
+      return;
+    }
+    const requested = typeof toolArgs.skill === 'string'
+      ? toolArgs.skill
+      : (typeof toolArgs.skill_name === 'string' ? toolArgs.skill_name : '');
+    const loadedSkill = requested ? findClaudeSkill(registry, requested) : null;
+    if (!loadedSkill) {
+      return;
+    }
+    state.skillToolCallCount += 1;
+    state.loadedSkillNames.add(loadedSkill.frontmatter.name);
+    state.loadRounds.push(roundNumber);
+    state.activeSkills.set(loadedSkill.frontmatter.name, {
+      name: loadedSkill.frontmatter.name,
+      baseDir: loadedSkill.baseDir,
+      loadedRound: roundNumber,
+    });
+    return;
+  }
+
+  if (state.activeSkills.size === 0) {
+    return;
+  }
+
+  state.postLoadToolNames.push(toolName);
+  if (!state.firstPostLoadToolName) {
+    state.firstPostLoadToolName = toolName;
+  }
+
+  const stringLeaves = collectStringLeaves(toolArgs).map((value) => normalizePathLikeString(value));
+  for (const skill of state.activeSkills.values()) {
+    const normalizedBaseDir = normalizePathLikeString(skill.baseDir);
+    for (const text of stringLeaves) {
+      if (!text.includes(normalizedBaseDir)) {
+        continue;
+      }
+      state.referencedSkillNames.add(skill.name);
+      state.referencedSkillBaseDirs.add(skill.baseDir);
+      state.referencedPaths.add(text);
+    }
+  }
 }
 
 function isProbablyText(content: Buffer): boolean {
@@ -2420,9 +2597,12 @@ async function runQuery(
   providerConfig: ProviderConfig,
 ): Promise<{ newSessionId: string; closedDuringQuery: boolean; result: string | null }> {
   const session = sessionId ? loadSession(sessionId) || createSession() : createSession();
+  const claudeSkillManager = new ClaudeSkillManager('/home/node/.claude/skills');
+  const initialSkillSync = claudeSkillManager.sync();
+  const skillConformanceState = createSkillConformanceState();
   const toolContext = createToolContext(
     containerInput,
-    discoverClaudeSkills('/home/node/.claude/skills'),
+    initialSkillSync.registry,
   );
   let multimodalNoticeSent = false;
   const systemPrompt: ChatMessage = {
@@ -2462,12 +2642,10 @@ async function runQuery(
 
     log(`Calling provider model ${providerConfig.model} (round ${roundNumber})`);
     const trimmedMessages = trimMessages(session.messages);
-    const claudeSkillRegistry = discoverClaudeSkills('/home/node/.claude/skills');
+    const skillSync = claudeSkillManager.sync();
+    const claudeSkillRegistry = skillSync.registry;
     toolContext.claudeSkillRegistry = claudeSkillRegistry;
-    const selectedClaudeSkillCandidates = resolveExplicitClaudeSkillCandidates(
-      claudeSkillRegistry,
-      prompt,
-    );
+    const selectedClaudeSkillCandidates = claudeSkillManager.resolveExplicit(prompt);
     toolContext.claudeSkillInvocationHints = new Map(
       selectedClaudeSkillCandidates
         .filter((entry) => entry.invocationHint)
@@ -2481,21 +2659,12 @@ async function runQuery(
           return pairs;
         }),
     );
-    const availableClaudeSkills = claudeSkillRegistry.all.map((skill) => ({
-      name: skill.frontmatter.name,
-      description: skill.frontmatter.description,
-      whenToUse: skill.frontmatter.whenToUse,
-      aliases: skill.frontmatter.aliases,
-      paths: skill.frontmatter.paths,
-      model: skill.frontmatter.model,
-      userInvocable: skill.frontmatter.userInvocable,
-      disableModelInvocation: skill.frontmatter.disableModelInvocation,
-    }));
+    const availableClaudeSkills = claudeSkillManager.listSkillSummaries();
     const autoMaterializedSkills = buildAutoMaterializedSkillMessages(
       selectedClaudeSkillCandidates,
     );
     const dynamicTools = buildToolDefinitions(
-      buildClaudeSkillToolDefinition(availableClaudeSkills),
+      claudeSkillManager.buildToolDefinition(),
     );
     writeProgress({
       type: 'context',
@@ -2514,6 +2683,11 @@ async function runQuery(
           : `(available skills: ${availableClaudeSkills.length}, no explicit skill invocation)`,
         2400,
       ),
+      claudeSkillRuntime: {
+        ...skillSync.runtime,
+        availableSkillCount: availableClaudeSkills.length,
+        explicitInvocationCount: selectedClaudeSkillCandidates.length,
+      },
       claudeSkillTrace: selectedClaudeSkillCandidates.map((entry) => ({
         name: entry.skill.frontmatter.name,
         score: entry.score,
@@ -2540,6 +2714,13 @@ async function runQuery(
             .join('\n'),
           2400,
         ),
+        claudeSkillRuntime: {
+          ...skillSync.runtime,
+          availableSkillCount: availableClaudeSkills.length,
+          explicitInvocationCount: selectedClaudeSkillCandidates.length,
+          materializedSkillCount: autoMaterializedSkills.names.length,
+          materializedSkillNames: autoMaterializedSkills.names,
+        },
       }, session.sessionId);
     }
     if (claudeSkillRegistry.parseErrors.length > 0) {
@@ -2549,6 +2730,11 @@ async function runQuery(
         round: roundNumber,
         message: 'claude_skills_parse_errors',
         parseErrors: claudeSkillRegistry.parseErrors,
+        claudeSkillRuntime: {
+          ...skillSync.runtime,
+          availableSkillCount: availableClaudeSkills.length,
+          explicitInvocationCount: selectedClaudeSkillCandidates.length,
+        },
         contentPreview: truncate(
           claudeSkillRegistry.parseErrors
             .map((entry) => `${entry.filePath}: ${entry.message}`)
@@ -2687,6 +2873,25 @@ async function runQuery(
 
     if (response.toolCalls.length === 0) {
       const finalText = (content || reasoning).trim();
+      const finalSkillConformance = buildSkillConformanceSnapshot(
+        skillConformanceState,
+        true,
+      );
+      if (finalSkillConformance) {
+        writeProgress({
+          type: 'context',
+          stage: 'info',
+          round: roundNumber,
+          message: 'claude_skills_conformance',
+          contentPreview: buildSkillConformancePreview(finalSkillConformance),
+          claudeSkillRuntime: {
+            ...skillSync.runtime,
+            availableSkillCount: availableClaudeSkills.length,
+            explicitInvocationCount: selectedClaudeSkillCandidates.length,
+          },
+          claudeSkillConformance: finalSkillConformance,
+        }, session.sessionId);
+      }
       writeProgress({
         type: 'lifecycle',
         stage: 'info',
@@ -2719,6 +2924,14 @@ async function runQuery(
       const toolStartedAt = Date.now();
       const toolResult = await executeToolCall(toolCall, toolContext);
       const toolDurationMs = Date.now() - toolStartedAt;
+      updateSkillConformanceFromTool(
+        skillConformanceState,
+        toolCall.function.name,
+        parsedToolArgs || {},
+        roundNumber,
+        claudeSkillRegistry,
+        toolResult.success,
+      );
       writeProgress({
         type: 'tool',
         stage: toolResult.success ? 'end' : 'error',
@@ -2737,6 +2950,26 @@ async function runQuery(
         name: toolCall.function.name,
         content: toolResult.modelContent,
       });
+    }
+
+    const roundSkillConformance = buildSkillConformanceSnapshot(
+      skillConformanceState,
+      false,
+    );
+    if (roundSkillConformance) {
+      writeProgress({
+        type: 'context',
+        stage: 'info',
+        round: roundNumber,
+        message: 'claude_skills_conformance',
+        contentPreview: buildSkillConformancePreview(roundSkillConformance),
+        claudeSkillRuntime: {
+          ...skillSync.runtime,
+          availableSkillCount: availableClaudeSkills.length,
+          explicitInvocationCount: selectedClaudeSkillCandidates.length,
+        },
+        claudeSkillConformance: roundSkillConformance,
+      }, session.sessionId);
     }
   }
 

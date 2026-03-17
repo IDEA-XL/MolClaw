@@ -150,8 +150,16 @@ function summarizeProgress(progress?: AgentProgressEvent): string {
       Array.isArray(progress.claudeSkillTrace) && progress.claudeSkillTrace.length > 0
         ? ` skills=${progress.claudeSkillTrace.map((entry) => entry.name).join(',')}`
         : '';
+    const skillRuntime =
+      progress.claudeSkillRuntime
+        ? ` skillCache=${progress.claudeSkillRuntime.cacheStatus} skillCount=${progress.claudeSkillRuntime.totalSkills} explicitSkills=${progress.claudeSkillRuntime.explicitInvocationCount ?? 0}`
+        : '';
+    const skillConformance =
+      progress.claudeSkillConformance
+        ? ` skillConformance=${progress.claudeSkillConformance.status} loadedSkills=${progress.claudeSkillConformance.loadedSkillNames.join(',')}`
+        : '';
     const message = progress.message ? ` message=${progress.message}` : '';
-    return `context ${progress.stage}${round}${historyMessages}${historyTokens}${trimmedMessages}${trimmedTokens}${skillTrace}${message}`;
+    return `context ${progress.stage}${round}${historyMessages}${historyTokens}${trimmedMessages}${trimmedTokens}${skillTrace}${skillRuntime}${skillConformance}${message}`;
   }
 
   return progress.message
