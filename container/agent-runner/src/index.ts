@@ -14,6 +14,22 @@ import path from 'path';
 import { promisify } from 'util';
 
 import { CronExpressionParser } from 'cron-parser';
+import {
+  buildClaudeSkillToolDefinition,
+  discoverClaudeSkills,
+  findClaudeSkill,
+  renderClaudeSkillForContext,
+  renderClaudeSkillInvocationHint,
+  renderClaudeSkillLoadedReminder,
+  resolveExplicitClaudeSkillCandidates,
+  type ClaudeSkillCandidate,
+  type ClaudeSkillRegistry,
+  type ClaudeSkillInvocationHint,
+} from './skills.js';
+import {
+  isSkillToolName,
+  serializeToolExecutionResult,
+} from './tool-results.js';
 
 interface ContainerInput {
   prompt: string;
@@ -70,6 +86,21 @@ interface AgentProgressEvent {
   promptTokenCount?: number;
   completionTokenCount?: number;
   totalTokenCount?: number;
+  claudeSkillTrace?: Array<{
+    name: string;
+    score: number;
+    reasons: string[];
+    explicitlyRequested: boolean;
+    invocationTrigger?: string;
+    invocationArgs?: string;
+    model?: string;
+    userInvocable?: boolean;
+    disableModelInvocation?: boolean;
+  }>;
+  parseErrors?: Array<{
+    filePath: string;
+    message: string;
+  }>;
   timestamp: string;
 }
 
@@ -172,6 +203,18 @@ interface ToolContext {
   containerInput: ContainerInput;
   readableRoots: string[];
   writableRoots: string[];
+  claudeSkillRegistry: ClaudeSkillRegistry;
+  claudeSkillInvocationHints: Map<string, ClaudeSkillInvocationHint>;
+}
+
+interface AutoMaterializedSkillsResult {
+  names: string[];
+  messages: ChatMessage[];
+  trace: Array<{
+    name: string;
+    score: number;
+    reasons: string[];
+  }>;
 }
 
 interface JsonSchema {
@@ -248,6 +291,7 @@ const SESSION_DIR = '/home/node/.claude/openai-sessions';
 const CONVERSATIONS_DIR = '/workspace/group/conversations';
 const MAX_TOOL_ROUNDS = 24;
 const MAX_TOOL_OUTPUT_CHARS = 16_000;
+const MAX_SKILL_TOOL_OUTPUT_CHARS = 48_000;
 const MAX_FILE_READ_CHARS = 24_000;
 const DEFAULT_INLINE_IMAGE_MAX_BYTES = 5 * 1024 * 1024; // 5MB
 const INLINE_IMAGE_MAX_BYTES = Math.max(
@@ -298,7 +342,7 @@ const TOOL_ENV_VARS = [
   'CLAUDE_CODE_OAUTH_TOKEN',
 ];
 
-const TOOL_DEFINITIONS: ToolDefinition[] = [
+const CORE_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
@@ -555,10 +599,17 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
 ];
 
+function buildToolDefinitions(skillTool: ToolDefinition | null): ToolDefinition[] {
+  return skillTool
+    ? [...CORE_TOOL_DEFINITIONS, skillTool]
+    : CORE_TOOL_DEFINITIONS;
+}
+
 type ToolExecutor = (args: Record<string, unknown>, context: ToolContext) => Promise<unknown>;
 
 interface ToolExecutionResult {
   output: string;
+  modelContent: string;
   success: boolean;
 }
 
@@ -898,7 +949,10 @@ function loadProviderConfig(containerInput: ContainerInput): ProviderConfig {
   };
 }
 
-function createToolContext(containerInput: ContainerInput): ToolContext {
+function createToolContext(
+  containerInput: ContainerInput,
+  claudeSkillRegistry: ClaudeSkillRegistry,
+): ToolContext {
   const readableRoots = [
     '/workspace/group',
     '/workspace/global',
@@ -916,6 +970,50 @@ function createToolContext(containerInput: ContainerInput): ToolContext {
     containerInput,
     readableRoots,
     writableRoots,
+    claudeSkillRegistry,
+    claudeSkillInvocationHints: new Map(),
+  };
+}
+
+function chooseAutoMaterializedSkills(
+  candidates: ClaudeSkillCandidate[],
+): ClaudeSkillCandidate[] {
+  return candidates
+    .filter((candidate) => candidate.explicitlyRequested)
+    .slice(0, 2);
+}
+
+function buildAutoMaterializedSkillMessages(
+  candidates: ClaudeSkillCandidate[],
+): AutoMaterializedSkillsResult {
+  const selected = chooseAutoMaterializedSkills(candidates);
+  if (selected.length === 0) {
+    return { names: [], messages: [], trace: [] };
+  }
+
+  const content = [
+    'The following skill instructions were auto-loaded because the user explicitly invoked these skills.',
+    ...selected.map((candidate) => [
+      `Auto-loaded skill: ${candidate.skill.frontmatter.name}`,
+      `Selection reasons: ${candidate.reasons.join(', ') || 'none'}`,
+      renderClaudeSkillInvocationHint(candidate.invocationHint),
+      renderClaudeSkillForContext(candidate.skill),
+    ].filter(Boolean).join('\n')),
+  ].join('\n\n');
+
+  return {
+    names: selected.map((candidate) => candidate.skill.frontmatter.name),
+    messages: [
+      {
+        role: 'system',
+        content,
+      },
+    ],
+    trace: selected.map((candidate) => ({
+      name: candidate.skill.frontmatter.name,
+      score: candidate.score,
+      reasons: candidate.reasons,
+    })),
   };
 }
 
@@ -1702,9 +1800,11 @@ function buildSystemPrompt(containerInput: ContainerInput): string {
       'Use bash for BLAST, minimap2, BWA, FastQC, PyMOL, Python scripts, and network calls.',
       'For biomedical literature retrieval, use search_pubmed first.',
       'Use read_file/write_file/edit_file/list_files/grep_files for direct workspace access.',
+      'If a relevant skill is available from /home/node/.claude/skills, invoke the skill tool before continuing with normal tools.',
       'Use send_message for progress updates during long jobs.',
       'Use send_image after generating plots or structure renders.',
       'Keep WhatsApp replies clean: no markdown headings, prefer short paragraphs or bullet lists.',
+      'Tool results and user messages may include <system-reminder> tags. These tags contain internal reminders and are not part of the user request.',
       'If part of your output is internal reasoning, wrap it in <internal> tags.',
       'Legacy references to mcp__bioclaw__send_message or mcp__bioclaw__send_image map to send_message and send_image in this runtime.',
       'Your writable workspace is primarily /workspace/group. The main group can also modify /workspace/project.',
@@ -1732,6 +1832,7 @@ function isImageUnsupportedError(message: string): boolean {
 async function callChatCompletion(
   providerConfig: ProviderConfig,
   messages: ChatMessage[],
+  tools: ToolDefinition[],
 ): Promise<{
   content: string;
   reasoning: string;
@@ -1763,7 +1864,7 @@ async function callChatCompletion(
   const payload: Record<string, unknown> = {
     model: providerConfig.model,
     messages: providerMessages,
-    tools: TOOL_DEFINITIONS,
+    tools,
     tool_choice: 'auto',
     max_tokens: providerConfig.maxTokens,
     temperature: providerConfig.temperature,
@@ -1919,11 +2020,10 @@ function waitForIpcMessage(): Promise<string | null> {
   });
 }
 
-function formatToolResult(result: unknown): string {
-  if (typeof result === 'string') {
-    return result;
-  }
-  return JSON.stringify(result, null, 2);
+function getToolOutputLimit(toolName: string): number {
+  return isSkillToolName(toolName)
+    ? MAX_SKILL_TOOL_OUTPUT_CHARS
+    : MAX_TOOL_OUTPUT_CHARS;
 }
 
 const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
@@ -2059,6 +2159,37 @@ const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
     }
 
     return truncate(matches.join('\n') || '(no matches)', MAX_TOOL_OUTPUT_CHARS);
+  },
+
+  async load_claude_skill(args, context) {
+    const skillName = ensureString(args.skill_name, 'skill_name');
+    return TOOL_EXECUTORS.skill({ skill: skillName }, context);
+  },
+
+  async skill(args, context) {
+    const skillName = ensureString(args.skill, 'skill');
+    const skill = findClaudeSkill(context.claudeSkillRegistry, skillName);
+    if (!skill) {
+      const parseErrors = context.claudeSkillRegistry.parseErrors
+        .filter((entry) => entry.filePath.toLowerCase().includes(skillName.toLowerCase()))
+        .map((entry) => `${entry.filePath}: ${entry.message}`);
+      const errorSuffix = parseErrors.length > 0
+        ? `\nParse errors:\n${parseErrors.join('\n')}`
+        : '';
+      throw new Error(`Skill not found in /home/node/.claude/skills: ${skillName}${errorSuffix}`);
+    }
+    const invocationHint =
+      context.claudeSkillInvocationHints.get(skill.frontmatter.name)
+      || (skill.frontmatter.aliases || [])
+        .map((alias) => context.claudeSkillInvocationHints.get(alias))
+        .find(Boolean);
+    return [
+      renderClaudeSkillInvocationHint(invocationHint),
+      renderClaudeSkillLoadedReminder(skill),
+      renderClaudeSkillForContext(skill),
+    ]
+      .filter(Boolean)
+      .join('\n');
   },
 
   async search_pubmed(args) {
@@ -2240,11 +2371,14 @@ const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
 
 async function executeToolCall(toolCall: ToolCall, context: ToolContext): Promise<ToolExecutionResult> {
   const executor = TOOL_EXECUTORS[toolCall.function.name];
+  const outputLimit = getToolOutputLimit(toolCall.function.name);
   if (!executor) {
-    return {
-      success: false,
-      output: JSON.stringify({ ok: false, error: `Unknown tool: ${toolCall.function.name}` }),
-    };
+    return serializeToolExecutionResult(
+      toolCall.function.name,
+      `Unknown tool: ${toolCall.function.name}`,
+      false,
+      outputLimit,
+    );
   }
 
   let args: Record<string, unknown> = {};
@@ -2253,35 +2387,29 @@ async function executeToolCall(toolCall: ToolCall, context: ToolContext): Promis
       ? JSON.parse(toolCall.function.arguments) as Record<string, unknown>
       : {};
   } catch (err) {
-    return {
-      success: false,
-      output: JSON.stringify({
-        ok: false,
-        error: `Failed to parse tool arguments: ${err instanceof Error ? err.message : String(err)}`,
-      }),
-    };
+    return serializeToolExecutionResult(
+      toolCall.function.name,
+      `Failed to parse tool arguments: ${err instanceof Error ? err.message : String(err)}`,
+      false,
+      outputLimit,
+    );
   }
 
   try {
     const result = await executor(args, context);
-    return {
-      success: true,
-      output: truncate(
-        JSON.stringify({ ok: true, result: formatToolResult(result) }, null, 2),
-        MAX_TOOL_OUTPUT_CHARS,
-      ),
-    };
+    return serializeToolExecutionResult(
+      toolCall.function.name,
+      result,
+      true,
+      outputLimit,
+    );
   } catch (err) {
-    return {
-      success: false,
-      output: truncate(
-        JSON.stringify({
-          ok: false,
-          error: err instanceof Error ? err.message : String(err),
-        }, null, 2),
-        MAX_TOOL_OUTPUT_CHARS,
-      ),
-    };
+    return serializeToolExecutionResult(
+      toolCall.function.name,
+      err instanceof Error ? err.message : String(err),
+      false,
+      outputLimit,
+    );
   }
 }
 
@@ -2292,7 +2420,10 @@ async function runQuery(
   providerConfig: ProviderConfig,
 ): Promise<{ newSessionId: string; closedDuringQuery: boolean; result: string | null }> {
   const session = sessionId ? loadSession(sessionId) || createSession() : createSession();
-  const toolContext = createToolContext(containerInput);
+  const toolContext = createToolContext(
+    containerInput,
+    discoverClaudeSkills('/home/node/.claude/skills'),
+  );
   let multimodalNoticeSent = false;
   const systemPrompt: ChatMessage = {
     role: 'system',
@@ -2331,6 +2462,101 @@ async function runQuery(
 
     log(`Calling provider model ${providerConfig.model} (round ${roundNumber})`);
     const trimmedMessages = trimMessages(session.messages);
+    const claudeSkillRegistry = discoverClaudeSkills('/home/node/.claude/skills');
+    toolContext.claudeSkillRegistry = claudeSkillRegistry;
+    const selectedClaudeSkillCandidates = resolveExplicitClaudeSkillCandidates(
+      claudeSkillRegistry,
+      prompt,
+    );
+    toolContext.claudeSkillInvocationHints = new Map(
+      selectedClaudeSkillCandidates
+        .filter((entry) => entry.invocationHint)
+        .flatMap((entry) => {
+          const pairs: Array<[string, ClaudeSkillInvocationHint]> = [
+            [entry.skill.frontmatter.name, entry.invocationHint!],
+          ];
+          for (const alias of entry.skill.frontmatter.aliases || []) {
+            pairs.push([alias, entry.invocationHint!]);
+          }
+          return pairs;
+        }),
+    );
+    const availableClaudeSkills = claudeSkillRegistry.all.map((skill) => ({
+      name: skill.frontmatter.name,
+      description: skill.frontmatter.description,
+      whenToUse: skill.frontmatter.whenToUse,
+      aliases: skill.frontmatter.aliases,
+      paths: skill.frontmatter.paths,
+      model: skill.frontmatter.model,
+      userInvocable: skill.frontmatter.userInvocable,
+      disableModelInvocation: skill.frontmatter.disableModelInvocation,
+    }));
+    const autoMaterializedSkills = buildAutoMaterializedSkillMessages(
+      selectedClaudeSkillCandidates,
+    );
+    const dynamicTools = buildToolDefinitions(
+      buildClaudeSkillToolDefinition(availableClaudeSkills),
+    );
+    writeProgress({
+      type: 'context',
+      stage: 'info',
+      round: roundNumber,
+      message: 'claude_skills_selected',
+      toolCalls: selectedClaudeSkillCandidates.length,
+      toolCallNames: selectedClaudeSkillCandidates.map((entry) => entry.skill.frontmatter.name).join(', '),
+      contentPreview: truncate(
+        selectedClaudeSkillCandidates.length > 0
+          ? selectedClaudeSkillCandidates
+            .map((entry) =>
+              `${entry.skill.frontmatter.name} reasons=${entry.reasons.join(', ') || 'none'}`,
+            )
+            .join('\n')
+          : `(available skills: ${availableClaudeSkills.length}, no explicit skill invocation)`,
+        2400,
+      ),
+      claudeSkillTrace: selectedClaudeSkillCandidates.map((entry) => ({
+        name: entry.skill.frontmatter.name,
+        score: entry.score,
+        reasons: entry.reasons,
+        explicitlyRequested: entry.explicitlyRequested,
+        invocationTrigger: entry.invocationHint?.trigger,
+        invocationArgs: entry.invocationHint?.args,
+        model: entry.skill.frontmatter.model,
+        userInvocable: entry.skill.frontmatter.userInvocable,
+        disableModelInvocation: entry.skill.frontmatter.disableModelInvocation,
+      })),
+    }, session.sessionId);
+    if (autoMaterializedSkills.names.length > 0) {
+      writeProgress({
+        type: 'context',
+        stage: 'info',
+        round: roundNumber,
+        message: 'claude_skills_materialized',
+        toolCalls: autoMaterializedSkills.names.length,
+        toolCallNames: autoMaterializedSkills.names.join(', '),
+        contentPreview: truncate(
+          autoMaterializedSkills.trace
+            .map((entry) => `${entry.name} reasons=${entry.reasons.join(', ') || 'none'}`)
+            .join('\n'),
+          2400,
+        ),
+      }, session.sessionId);
+    }
+    if (claudeSkillRegistry.parseErrors.length > 0) {
+      writeProgress({
+        type: 'context',
+        stage: 'info',
+        round: roundNumber,
+        message: 'claude_skills_parse_errors',
+        parseErrors: claudeSkillRegistry.parseErrors,
+        contentPreview: truncate(
+          claudeSkillRegistry.parseErrors
+            .map((entry) => `${entry.filePath}: ${entry.message}`)
+            .join('\n'),
+          2400,
+        ),
+      }, session.sessionId);
+    }
     writeProgress({
       type: 'context',
       stage: 'info',
@@ -2369,7 +2595,8 @@ async function runQuery(
     try {
       response = await callChatCompletion(
         providerConfig,
-        [systemPrompt, ...trimmedMessages],
+        [systemPrompt, ...autoMaterializedSkills.messages, ...trimmedMessages],
+        dynamicTools,
       );
     } catch (err) {
       writeProgress({
@@ -2391,7 +2618,7 @@ async function runQuery(
       response.usage?.completionTokens ?? estimateTokenCount(completionText);
     const promptTokenCount =
       response.usage?.promptTokens ??
-      getMessagesTokenCount([systemPrompt, ...trimmedMessages]);
+      getMessagesTokenCount([systemPrompt, ...autoMaterializedSkills.messages, ...trimmedMessages]);
     const totalTokenCount =
       response.usage?.totalTokens ?? promptTokenCount + completionTokenCount;
 
@@ -2508,7 +2735,7 @@ async function runQuery(
         role: 'tool',
         tool_call_id: toolCall.id,
         name: toolCall.function.name,
-        content: toolResult.output,
+        content: toolResult.modelContent,
       });
     }
   }

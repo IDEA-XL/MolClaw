@@ -146,7 +146,12 @@ function summarizeProgress(progress?: AgentProgressEvent): string {
       progress.trimmedTokenCount !== undefined
         ? ` trimmedTokens=${progress.trimmedTokenCount}`
         : '';
-    return `context ${progress.stage}${round}${historyMessages}${historyTokens}${trimmedMessages}${trimmedTokens}`;
+    const skillTrace =
+      Array.isArray(progress.claudeSkillTrace) && progress.claudeSkillTrace.length > 0
+        ? ` skills=${progress.claudeSkillTrace.map((entry) => entry.name).join(',')}`
+        : '';
+    const message = progress.message ? ` message=${progress.message}` : '';
+    return `context ${progress.stage}${round}${historyMessages}${historyTokens}${trimmedMessages}${trimmedTokens}${skillTrace}${message}`;
   }
 
   return progress.message

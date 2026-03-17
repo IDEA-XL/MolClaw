@@ -88,6 +88,21 @@ export interface AgentProgressEvent {
   promptTokenCount?: number;
   completionTokenCount?: number;
   totalTokenCount?: number;
+  claudeSkillTrace?: Array<{
+    name: string;
+    score: number;
+    reasons: string[];
+    explicitlyRequested: boolean;
+    invocationTrigger?: string;
+    invocationArgs?: string;
+    model?: string;
+    userInvocable?: boolean;
+    disableModelInvocation?: boolean;
+  }>;
+  parseErrors?: Array<{
+    filePath: string;
+    message: string;
+  }>;
   timestamp: string;
 }
 
@@ -95,6 +110,48 @@ interface VolumeMount {
   hostPath: string;
   containerPath: string;
   readonly: boolean;
+}
+
+function copyDirectoryRecursive(srcDir: string, dstDir: string): void {
+  const stat = fs.statSync(srcDir);
+  if (!stat.isDirectory()) {
+    throw new Error(`copyDirectoryRecursive expected directory: ${srcDir}`);
+  }
+
+  fs.mkdirSync(dstDir, { recursive: true });
+
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    const srcPath = path.join(srcDir, entry.name);
+    const dstPath = path.join(dstDir, entry.name);
+
+    if (entry.isDirectory()) {
+      copyDirectoryRecursive(srcPath, dstPath);
+      continue;
+    }
+
+    if (entry.isFile()) {
+      fs.mkdirSync(path.dirname(dstPath), { recursive: true });
+      fs.copyFileSync(srcPath, dstPath);
+    }
+  }
+}
+
+function syncSkillDirectories(
+  sourceDirs: string[],
+  destinationDir: string,
+): void {
+  for (const sourceDir of sourceDirs) {
+    if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
+      continue;
+    }
+
+    for (const skillDir of fs.readdirSync(sourceDir)) {
+      const srcDir = path.join(sourceDir, skillDir);
+      if (!fs.statSync(srcDir).isDirectory()) continue;
+      const dstDir = path.join(destinationDir, skillDir);
+      copyDirectoryRecursive(srcDir, dstDir);
+    }
+  }
 }
 
 function buildVolumeMounts(
@@ -165,22 +222,14 @@ function buildVolumeMounts(
     }, null, 2) + '\n');
   }
 
-  // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.mkdirSync(dstDir, { recursive: true });
-      for (const file of fs.readdirSync(srcDir)) {
-        const srcFile = path.join(srcDir, file);
-        const dstFile = path.join(dstDir, file);
-        fs.copyFileSync(srcFile, dstFile);
-      }
-    }
-  }
+  syncSkillDirectories(
+    [
+      path.join(projectRoot, 'container', 'skills'),
+      path.join(projectRoot, '.claude', 'skills'),
+    ],
+    skillsDst,
+  );
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
@@ -206,6 +255,11 @@ function buildVolumeMounts(
   mounts.push({
     hostPath: agentRunnerSrc,
     containerPath: '/app/src',
+    readonly: true,
+  });
+  mounts.push({
+    hostPath: path.join(projectRoot, 'container', 'agent-runner', 'tsconfig.json'),
+    containerPath: '/app/tsconfig.json',
     readonly: true,
   });
 

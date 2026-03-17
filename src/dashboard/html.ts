@@ -1268,9 +1268,65 @@ export function getDashboardHtml(): string {
         );
     }
 
+    function renderSkillTraceBody(payload, foldKeyPrefix) {
+      const trace = Array.isArray(payload.claudeSkillTrace) ? payload.claudeSkillTrace : [];
+      const parseErrors = Array.isArray(payload.parseErrors) ? payload.parseErrors : [];
+      const keyPrefix = foldKeyPrefix || 'skill-trace';
+
+      if (trace.length > 0) {
+        const summary = trace
+          .map((entry) => {
+            const reasons = Array.isArray(entry.reasons) ? entry.reasons.join(', ') : '';
+            return entry.name + ' [' + entry.score + ']' + (reasons ? ' ' + reasons : '');
+          })
+          .join(' | ');
+
+        const detailRows = trace.map((entry) => {
+          const reasons = Array.isArray(entry.reasons) ? entry.reasons.join(', ') : '-';
+          const flags = [
+            entry.explicitlyRequested ? 'explicit' : '',
+            entry.userInvocable === false ? 'user_invocable=false' : '',
+            entry.disableModelInvocation === true ? 'disable_model_invocation=true' : '',
+            entry.model ? ('model=' + entry.model) : '',
+            entry.invocationTrigger ? ('trigger=' + entry.invocationTrigger) : '',
+            entry.invocationArgs ? ('args=' + entry.invocationArgs) : '',
+          ].filter(Boolean).join(' · ');
+          return '<div class="kv-item">'
+            + '<div class="k">' + esc(entry.name || 'unknown') + '</div>'
+            + '<div class="v">score=' + esc(entry.score == null ? '-' : String(entry.score))
+            + (flags ? ' · ' + esc(flags) : '')
+            + '<br><span class="muted">' + esc(reasons || '-') + '</span></div>'
+            + '</div>';
+        }).join('');
+
+        return ''
+          + '<div class="msg-body">' + esc(summary || '(no skill trace)') + '</div>'
+          + renderFoldSummary(
+            'view skill routing trace',
+            '<div class="kv-list">' + detailRows + '</div>',
+            keyPrefix + ':detail',
+          );
+      }
+
+      if (parseErrors.length > 0) {
+        return ''
+          + '<div class="msg-body error-text">Skill parse errors: ' + esc(String(parseErrors.length)) + '</div>'
+          + renderFoldSummary(
+            'view parse errors',
+            renderCodeBlock(parseErrors.map((entry) => entry.filePath + ': ' + entry.message).join('\\n'), ''),
+            keyPrefix + ':errors',
+          );
+      }
+
+      return renderTextWithCodeBlocks(payload.contentPreview || '');
+    }
+
     function renderItemBody(item) {
       if (item.kind === 'round') {
         return buildRoundBody(item.payload || {}, item.key || 'round');
+      }
+      if (item.kind === 'skill-trace') {
+        return renderSkillTraceBody(item.payload || {}, item.key || 'skill-trace');
       }
       if (item.kind === 'tool-call') {
         return renderToolCallBody(item.payload || {}, item.body || '', item.key || 'tool-call');
@@ -1384,6 +1440,19 @@ export function getDashboardHtml(): string {
             role: 'error',
             meta: e.eventType,
             body: p.error || p.message || 'unknown error',
+            payload: p,
+          });
+          continue;
+        }
+
+        if (e.eventType === 'context' && (p.message === 'claude_skills_selected' || p.message === 'claude_skills_parse_errors')) {
+          items.push({
+            key: 'e-' + e.id,
+            ts: e.ts,
+            kind: 'skill-trace',
+            role: p.message === 'claude_skills_parse_errors' ? 'skill parse' : 'skill routing',
+            meta: p.round != null ? ('round=' + p.round) : 'context',
+            body: typeof p.contentPreview === 'string' ? p.contentPreview : '',
             payload: p,
           });
           continue;
@@ -1508,6 +1577,21 @@ export function getDashboardHtml(): string {
       return null;
     }
 
+    function getLatestSkillTraceEvent() {
+      const events = getFilteredEvents();
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const e = events[i];
+        const p = getEventPayload(e);
+        if (
+          e.eventType === 'context'
+          && (p.message === 'claude_skills_selected' || p.message === 'claude_skills_parse_errors')
+        ) {
+          return e;
+        }
+      }
+      return null;
+    }
+
     function getLatestProviderEvent() {
       const events = getFilteredEvents();
       for (let i = events.length - 1; i >= 0; i -= 1) {
@@ -1619,9 +1703,11 @@ export function getDashboardHtml(): string {
     function renderContextPanel() {
       const latestContext = getLatestContextEvent();
       const latestProvider = getLatestProviderEvent();
+      const latestSkillTrace = getLatestSkillTraceEvent();
 
       const ctx = latestContext ? getEventPayload(latestContext) : {};
       const provider = latestProvider ? getEventPayload(latestProvider) : {};
+      const skillTrace = latestSkillTrace ? getEventPayload(latestSkillTrace) : {};
       const modelVersion = getLatestModelVersion();
       const latestSessionId = getLatestSessionId();
       const historyTokens = resolveHistoryTokens(ctx);
@@ -1663,6 +1749,14 @@ export function getDashboardHtml(): string {
         + '  <div class="kv"><span class="muted">prompt / completion / total</span><span>'
         +      esc((promptTokens ?? 'n/a') + ' / ' + (completionTokens ?? 'n/a') + ' / ' + (totalTokens ?? 'n/a'))
         + '  </span></div>'
+        + '</div>'
+        + '<div class="card">'
+        + '  <p class="card-title">Skill Routing</p>'
+        + (
+          latestSkillTrace
+            ? renderSkillTraceBody(skillTrace, 'context-skill-trace')
+            : '<div class="empty">No skill routing trace yet</div>'
+        )
         + '</div>'
         + '<div class="card">'
         + '  <p class="card-title">Recent Rounds (msg/token)</p>'
@@ -2037,4 +2131,3 @@ export function getDashboardHtml(): string {
 </body>
 </html>`;
 }
-

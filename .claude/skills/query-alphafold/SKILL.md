@@ -1,6 +1,12 @@
 ---
 name: query-alphafold
 description: Query AlphaFold protein structure predictions. Use when user asks about protein structure, 3D structure, protein folding, or structure prediction. Triggers on "alphafold", "protein structure", "3D structure", "folding", "pLDDT", "structure prediction".
+aliases:
+  - af2
+  - alphafold2
+  - colabfold
+  - esmfold
+when_to_use: Use for protein structure prediction requests, especially when the user asks for AlphaFold/AF2-style predicted structures or wants a predicted PDB/CIF returned.
 ---
 
 # AlphaFold Structure Database Query
