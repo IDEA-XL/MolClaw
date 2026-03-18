@@ -10,6 +10,7 @@ import {
   DASHBOARD_HOST,
   DASHBOARD_PORT,
   DASHBOARD_TOKEN,
+  GROUPS_DIR,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
@@ -35,6 +36,7 @@ import {
   clearGroupModelPreference,
   getAllChats,
   AgentEventInput,
+  createSessionSummary,
   getAllGroupModelPreferences,
   getAllRegisteredGroups,
   getAllSessions,
@@ -51,12 +53,18 @@ import {
   insertAgentEvent,
   storeChatMetadata,
   storeMessage,
+  upsertMemoryEntryByExternalId,
 } from './db.js';
 import { publishAgentEvent } from './agent-events.js';
 import { startDashboardServer, DashboardServerHandle } from './dashboard.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  appendClosingSummaryToDailyMemory,
+  buildClosingSessionSummary,
+  loadArchivedSession,
+} from './session-rollup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
@@ -146,6 +154,22 @@ function summarizeProgress(progress?: AgentProgressEvent): string {
       progress.trimmedTokenCount !== undefined
         ? ` trimmedTokens=${progress.trimmedTokenCount}`
         : '';
+    const memoryHits =
+      progress.memoryHitCount !== undefined
+        ? ` memoryHits=${progress.memoryHitCount}`
+        : '';
+    const recentMemory =
+      progress.recentMemoryCount !== undefined
+        ? ` recentMemory=${progress.recentMemoryCount}`
+        : '';
+    const durableMemoryTokens =
+      progress.durableMemoryTokenCount !== undefined
+        ? ` durableMemoryTokens=${progress.durableMemoryTokenCount}`
+        : '';
+    const sessionSummaryTokens =
+      progress.sessionSummaryTokenCount !== undefined
+        ? ` sessionSummaryTokens=${progress.sessionSummaryTokenCount}`
+        : '';
     const skillTrace =
       Array.isArray(progress.claudeSkillTrace) && progress.claudeSkillTrace.length > 0
         ? ` skills=${progress.claudeSkillTrace.map((entry) => entry.name).join(',')}`
@@ -159,7 +183,7 @@ function summarizeProgress(progress?: AgentProgressEvent): string {
         ? ` skillConformance=${progress.claudeSkillConformance.status} loadedSkills=${progress.claudeSkillConformance.loadedSkillNames.join(',')}`
         : '';
     const message = progress.message ? ` message=${progress.message}` : '';
-    return `context ${progress.stage}${round}${historyMessages}${historyTokens}${trimmedMessages}${trimmedTokens}${skillTrace}${skillRuntime}${skillConformance}${message}`;
+    return `context ${progress.stage}${round}${historyMessages}${historyTokens}${trimmedMessages}${trimmedTokens}${memoryHits}${recentMemory}${durableMemoryTokens}${sessionSummaryTokens}${skillTrace}${skillRuntime}${skillConformance}${message}`;
   }
 
   return progress.message
@@ -534,6 +558,99 @@ function parseSessionResetCommand(raw: string): boolean {
   return NEW_SESSION_COMMANDS.has(normalized);
 }
 
+function archiveSessionOnReset(
+  chatJid: string,
+  group: RegisteredGroup,
+  previousSessionId: string,
+  source: string,
+): void {
+  const archivedSession = loadArchivedSession(
+    DATA_DIR,
+    group.folder,
+    previousSessionId,
+  );
+  if (!archivedSession) {
+    logger.warn(
+      { chatJid, groupFolder: group.folder, previousSessionId, source },
+      'No archived session file found for closing summary',
+    );
+    return;
+  }
+
+  const closingSummary = buildClosingSessionSummary(archivedSession);
+  if (!closingSummary) {
+    logger.info(
+      { chatJid, groupFolder: group.folder, previousSessionId, source },
+      'Skipped closing summary because archived session was empty',
+    );
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const dailyPath = appendClosingSummaryToDailyMemory(
+    GROUPS_DIR,
+    group.folder,
+    previousSessionId,
+    closingSummary,
+    new Date(now),
+  );
+
+  createSessionSummary({
+    sessionId: previousSessionId,
+    groupFolder: group.folder,
+    chatJid,
+    summaryType: 'closing',
+    content: closingSummary.content,
+    tokenCount: closingSummary.tokenCount,
+    createdAt: now,
+  });
+
+  upsertMemoryEntryByExternalId({
+    externalId: `closing-summary:${previousSessionId}`,
+    scope: 'group',
+    scopeId: group.folder,
+    kind: 'summary',
+    title: closingSummary.title,
+    content: closingSummary.content,
+    tags: ['closing_summary', 'session_rollup'],
+    source: 'session_rollup',
+    pinned: false,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  recordAgentEvent({
+    ts: now,
+    chatJid,
+    groupFolder: group.folder,
+    sessionId: previousSessionId,
+    eventType: 'context',
+    stage: 'info',
+    payload: {
+      message: 'closing_summary_saved',
+      summaryType: 'closing',
+      tokenCount: closingSummary.tokenCount,
+      messageCount: closingSummary.messageCount,
+      dailyPath,
+      source,
+      title: closingSummary.title,
+      preview: closingSummary.content.slice(0, 300),
+    },
+  });
+
+  logger.info(
+    {
+      chatJid,
+      groupFolder: group.folder,
+      previousSessionId,
+      tokenCount: closingSummary.tokenCount,
+      dailyPath,
+      source,
+    },
+    'Closing session summary archived',
+  );
+}
+
 function resetChatSession(chatJid: string, source: string): SessionResetResult {
   const group = registeredGroups[chatJid];
   if (!group) {
@@ -552,6 +669,17 @@ function resetChatSession(chatJid: string, source: string): SessionResetResult {
   sessionResetVersions[group.folder] = (sessionResetVersions[group.folder] || 0) + 1;
 
   queue.closeStdin(chatJid);
+
+  if (previousSessionId) {
+    try {
+      archiveSessionOnReset(chatJid, group, previousSessionId, source);
+    } catch (err) {
+      logger.warn(
+        { chatJid, groupFolder: group.folder, previousSessionId, source, err },
+        'Failed to archive closing session summary during reset',
+      );
+    }
+  }
 
   const payload: Record<string, unknown> = {
     message: 'session_reset',

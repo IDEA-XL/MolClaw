@@ -521,6 +521,11 @@ export function getDashboardHtml(): string {
     let allEvents = [];
     let allMessages = [];
     let allGroups = [];
+    let sessionMemoryHits = [];
+    let sessionSummaries = [];
+    let sessionArtifactsLoading = false;
+    let sessionArtifactsError = '';
+    let sessionArtifactsTimer = null;
     let currentSessionFilter = '__latest__';
     let sessionFilterInitialized = false;
     let showAllSessionOptions = false;
@@ -620,10 +625,68 @@ export function getDashboardHtml(): string {
       return currentSessionFilter;
     }
 
+    function getEffectiveSessionIdForArtifacts() {
+      const effective = getEffectiveSessionFilter();
+      if (effective && effective !== '__all__') {
+        return effective;
+      }
+      const latest = getLatestSessionIdFromEvents(allEvents);
+      return latest || '';
+    }
+
     function sessionLabel(sessionId) {
       if (!sessionId) return 'unknown';
       if (sessionId.length <= 18) return sessionId;
       return sessionId.slice(0, 8) + '...' + sessionId.slice(-8);
+    }
+
+    function summarizeMemoryHitReason(reason) {
+      if (!reason) return '';
+      return String(reason)
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function aggregateSessionMemoryHits(hits) {
+      const groups = new Map();
+      for (const hit of hits || []) {
+        const key = [
+          hit.memoryExternalId || ('id:' + (hit.memoryEntryId || '?')),
+          hit.injectionLayer || '',
+        ].join('|');
+        const existing = groups.get(key) || {
+          title: hit.memoryTitle || hit.memoryExternalId || ('memory #' + (hit.memoryEntryId || '?')),
+          injectionLayer: hit.injectionLayer || '-',
+          memoryKind: hit.memoryKind || '',
+          memoryScope: hit.memoryScope || '',
+          memoryScopeId: hit.memoryScopeId || '',
+          tokenCount: hit.tokenCount,
+          reason: summarizeMemoryHitReason(hit.reason),
+          rounds: new Set(),
+          count: 0,
+          latestTs: hit.ts || '',
+        };
+        existing.count += 1;
+        if (hit.round != null) existing.rounds.add(hit.round);
+        if (!existing.reason && hit.reason) {
+          existing.reason = summarizeMemoryHitReason(hit.reason);
+        }
+        if (existing.tokenCount == null && hit.tokenCount != null) {
+          existing.tokenCount = hit.tokenCount;
+        }
+        if ((hit.ts || '') > existing.latestTs) {
+          existing.latestTs = hit.ts || '';
+        }
+        groups.set(key, existing);
+      }
+
+      return Array.from(groups.values())
+        .sort((a, b) => {
+          if (a.latestTs < b.latestTs) return 1;
+          if (a.latestTs > b.latestTs) return -1;
+          return b.count - a.count;
+        });
     }
 
     function refreshSessionFilterOptions() {
@@ -1757,6 +1820,87 @@ export function getDashboardHtml(): string {
         .slice(-12);
     }
 
+    function renderSessionArtifactsCard() {
+      const artifactSessionId = getEffectiveSessionIdForArtifacts();
+      if (!artifactSessionId) {
+        return ''
+          + '<div class="card">'
+          + '  <p class="card-title">Session Memory</p>'
+          + '  <div class="empty">No active session yet</div>'
+          + '</div>';
+      }
+
+      if (sessionArtifactsLoading) {
+        return ''
+          + '<div class="card">'
+          + '  <p class="card-title">Session Memory</p>'
+          + '  <div class="empty">Loading session artifacts...</div>'
+          + '</div>';
+      }
+
+      if (sessionArtifactsError) {
+        return ''
+          + '<div class="card">'
+          + '  <p class="card-title">Session Memory</p>'
+          + '  <div class="empty error-text">' + esc(sessionArtifactsError) + '</div>'
+          + '</div>';
+      }
+
+      const latestSummary = sessionSummaries.length > 0 ? sessionSummaries[0] : null;
+      const summaryHtml = latestSummary
+        ? ''
+          + '<div class="kv"><span class="muted">latest summary</span><span>'
+          + esc((latestSummary.summaryType || 'summary') + ' · ' + (latestSummary.tokenCount != null ? latestSummary.tokenCount + ' tok' : 'n/a'))
+          + '</span></div>'
+          + '<div class="kv"><span class="muted">round range</span><span>'
+          + esc((latestSummary.roundStart ?? '-') + ' - ' + (latestSummary.roundEnd ?? '-'))
+          + '</span></div>'
+          + renderFoldSummary(
+            'view session summary',
+            renderTextWithCodeBlocks(latestSummary.content || ''),
+            'session-summary:' + esc(artifactSessionId),
+          )
+        : '<div class="empty">No session summary stored yet</div>';
+
+      const aggregatedHits = aggregateSessionMemoryHits(sessionMemoryHits);
+      const hitRows = aggregatedHits.slice(0, 12).map((hit) => {
+        const meta = [
+          hit.injectionLayer || '-',
+          hit.memoryKind ? ('kind=' + hit.memoryKind) : '',
+          hit.memoryScope ? ('scope=' + hit.memoryScope + (hit.memoryScopeId ? '(' + hit.memoryScopeId + ')' : '')) : '',
+          hit.tokenCount != null ? ('tok=' + hit.tokenCount) : '',
+          hit.count > 1 ? ('hits=' + hit.count) : '',
+          hit.rounds.size > 0 ? ('rounds=' + Array.from(hit.rounds).sort((a, b) => a - b).join(',')) : '',
+        ].filter(Boolean).join(' · ');
+        return '<div class="kv-item">'
+          + '<div class="k">' + esc(hit.title) + '</div>'
+          + '<div class="v">' + esc(meta || '-') 
+          + (hit.reason ? '<br><span class="muted">' + esc(hit.reason) + '</span>' : '')
+          + '</div>'
+          + '</div>';
+      }).join('');
+
+      const hitsHtml = sessionMemoryHits.length > 0
+        ? '<div class="kv"><span class="muted">memory hits</span><span>' + esc(String(sessionMemoryHits.length) + ' raw / ' + String(aggregatedHits.length) + ' unique') + '</span></div>'
+          + renderFoldSummary(
+            'view session memory hits',
+            '<div class="kv-list">' + hitRows + '</div>',
+            'session-hits:' + esc(artifactSessionId),
+          )
+        : '<div class="empty">No memory hits recorded for this session yet</div>';
+
+      return ''
+        + '<div class="card">'
+        + '  <p class="card-title">Session Memory</p>'
+        + '  <div class="kv"><span class="muted">session</span><span>' + esc(sessionLabel(artifactSessionId)) + '</span></div>'
+        + '  <div class="kv"><span class="muted">artifact mode</span><span>'
+        + esc(currentSessionFilter === '__all__' ? 'latest session while viewing all' : 'selected session')
+        + '</span></div>'
+        + summaryHtml
+        + hitsHtml
+        + '</div>';
+    }
+
     function renderContextPanel() {
       const latestContext = getLatestContextEvent();
       const latestProvider = getLatestProviderEvent();
@@ -1803,6 +1947,13 @@ export function getDashboardHtml(): string {
         + '  <div class="kv"><span class="muted">round</span><span>' + esc(ctx.round ?? provider.round ?? 'n/a') + '</span></div>'
         + '  <div class="kv"><span class="muted">history tokens</span><span>' + esc(historyTokens ?? 'n/a') + '</span></div>'
         + '  <div class="kv"><span class="muted">trimmed tokens</span><span>' + esc(trimmedTokens ?? 'n/a') + '</span></div>'
+        + '  <div class="kv"><span class="muted">memory hits / durable tokens</span><span>'
+        + esc((ctx.memoryHitCount ?? 'n/a') + ' / ' + (ctx.durableMemoryTokenCount ?? 'n/a'))
+        + '</span></div>'
+        + '  <div class="kv"><span class="muted">pinned / recent / matched</span><span>'
+        + esc((ctx.pinnedMemoryCount ?? 'n/a') + ' / ' + (ctx.recentMemoryCount ?? 'n/a') + ' / ' + (ctx.matchedMemoryCount ?? 'n/a'))
+        + '</span></div>'
+        + '  <div class="kv"><span class="muted">session summary tokens</span><span>' + esc(ctx.sessionSummaryTokenCount ?? 'n/a') + '</span></div>'
         + '  <div class="kv"><span class="muted">prompt / completion / total</span><span>'
         +      esc((promptTokens ?? 'n/a') + ' / ' + (completionTokens ?? 'n/a') + ' / ' + (totalTokens ?? 'n/a'))
         + '  </span></div>'
@@ -1815,6 +1966,7 @@ export function getDashboardHtml(): string {
             : '<div class="empty">No skill routing trace yet</div>'
         )
         + '</div>'
+        + renderSessionArtifactsCard()
         + '<div class="card">'
         + '  <p class="card-title">Recent Rounds (msg/token)</p>'
         + roundsHtml
@@ -1963,6 +2115,62 @@ export function getDashboardHtml(): string {
       }
     }
 
+    async function loadSessionArtifacts() {
+      if (!currentChat) {
+        sessionMemoryHits = [];
+        sessionSummaries = [];
+        sessionArtifactsError = '';
+        sessionArtifactsLoading = false;
+        renderContextPanel();
+        return;
+      }
+      const sessionId = getEffectiveSessionIdForArtifacts();
+      if (!sessionId) {
+        sessionMemoryHits = [];
+        sessionSummaries = [];
+        sessionArtifactsError = '';
+        sessionArtifactsLoading = false;
+        renderContextPanel();
+        return;
+      }
+
+      sessionArtifactsLoading = true;
+      sessionArtifactsError = '';
+      renderContextPanel();
+
+      try {
+        const [hitsData, summaryData] = await Promise.all([
+          fetchJson(
+            '/api/memory-hits?chat_jid=' + encodeURIComponent(currentChat)
+            + '&session_id=' + encodeURIComponent(sessionId)
+            + '&limit=100',
+          ),
+          fetchJson(
+            '/api/session-summaries?chat_jid=' + encodeURIComponent(currentChat)
+            + '&session_id=' + encodeURIComponent(sessionId)
+            + '&limit=20',
+          ),
+        ]);
+        sessionMemoryHits = Array.isArray(hitsData.hits) ? hitsData.hits : [];
+        sessionSummaries = Array.isArray(summaryData.summaries) ? summaryData.summaries : [];
+      } catch (err) {
+        sessionArtifactsError = err instanceof Error ? err.message : String(err);
+      } finally {
+        sessionArtifactsLoading = false;
+        renderContextPanel();
+      }
+    }
+
+    function scheduleSessionArtifactsReload() {
+      if (sessionArtifactsTimer) {
+        clearTimeout(sessionArtifactsTimer);
+      }
+      sessionArtifactsTimer = setTimeout(() => {
+        sessionArtifactsTimer = null;
+        loadSessionArtifacts().catch(() => {});
+      }, 250);
+    }
+
     async function loadEvents() {
       if (!currentChat) return;
       const data = await fetchJson('/api/events?chat_jid=' + encodeURIComponent(currentChat) + '&limit=400');
@@ -1972,6 +2180,7 @@ export function getDashboardHtml(): string {
       renderTimeline();
       renderContextPanel();
       updateTopUsage();
+      await loadSessionArtifacts();
     }
 
     function setStreamStatus(text) {
@@ -1994,6 +2203,16 @@ export function getDashboardHtml(): string {
       }
       if (allEvents.length > 1600) {
         allEvents = allEvents.slice(allEvents.length - 1600);
+      }
+      if (
+        event.eventType === 'context'
+        && (
+          payload.message === 'memory_context_assembled'
+          || payload.message === 'rolling_summary_updated'
+          || payload.message === 'silent_memory_flush_completed'
+        )
+      ) {
+        scheduleSessionArtifactsReload();
       }
       refreshSessionFilterOptions();
       updateSelectedBadge();
@@ -2028,6 +2247,10 @@ export function getDashboardHtml(): string {
 
     async function selectChat(jid) {
       currentChat = jid;
+      sessionMemoryHits = [];
+      sessionSummaries = [];
+      sessionArtifactsError = '';
+      sessionArtifactsLoading = false;
       currentSessionFilter = '__latest__';
       sessionFilterInitialized = false;
       showAllSessionOptions = false;
@@ -2057,6 +2280,7 @@ export function getDashboardHtml(): string {
         renderTimeline();
         renderContextPanel();
         updateTopUsage();
+        loadSessionArtifacts().catch(() => {});
       });
       sessionMoreBtnEl.addEventListener('click', () => {
         if (sessionMoreBtnEl.disabled) return;

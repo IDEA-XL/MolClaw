@@ -3,13 +3,22 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   _initTestDatabase,
   clearSession,
+  createMemoryEntry,
+  createSessionSummary,
   createTask,
   deleteTask,
   getAllChats,
+  getMemoryEntry,
+  getMemoryEntryByExternalId,
+  getMemoryHits,
   getRecentMessages,
   getMessagesSince,
   getNewMessages,
   getSession,
+  getSessionSummaries,
+  listMemoryEntries,
+  recordMemoryHit,
+  upsertMemoryEntryByExternalId,
   setSession,
   getTaskById,
   storeChatMetadata,
@@ -300,6 +309,152 @@ describe('session accessors', () => {
     expect(getSession('group-a')).toBe('session-123');
     clearSession('group-a');
     expect(getSession('group-a')).toBeUndefined();
+  });
+});
+
+describe('memory persistence', () => {
+  it('creates and lists memory entries with typed fields', () => {
+    const memoryId = createMemoryEntry({
+      externalId: 'mem-crbn-focus',
+      scope: 'group',
+      scopeId: 'discord-dm-1',
+      kind: 'fact',
+      title: 'CRBN focus',
+      content: 'User is tracking CRBN papers from 2024 onward.',
+      tags: ['crbn', 'pubmed'],
+      source: 'tool',
+      pinned: true,
+    });
+
+    const created = getMemoryEntry(memoryId);
+    expect(created?.scope).toBe('group');
+    expect(created?.externalId).toBe('mem-crbn-focus');
+    expect(created?.scopeId).toBe('discord-dm-1');
+    expect(created?.title).toBe('CRBN focus');
+    expect(created?.tags).toEqual(['crbn', 'pubmed']);
+    expect(created?.pinned).toBe(true);
+    expect(created?.hitCount).toBe(0);
+
+    createMemoryEntry({
+      scope: 'group',
+      scopeId: 'discord-dm-1',
+      kind: 'summary',
+      content: 'Older archived memory.',
+      source: 'session_rollup',
+      archived: true,
+    });
+
+    const activeEntries = listMemoryEntries({
+      scope: 'group',
+      scopeId: 'discord-dm-1',
+    });
+    expect(activeEntries).toHaveLength(1);
+    expect(activeEntries[0].id).toBe(memoryId);
+
+    const allEntries = listMemoryEntries({
+      scope: 'group',
+      scopeId: 'discord-dm-1',
+      includeArchived: true,
+    });
+    expect(allEntries).toHaveLength(2);
+  });
+
+  it('records memory hits and updates access counters', () => {
+    const memoryId = createMemoryEntry({
+      scope: 'group',
+      scopeId: 'discord-dm-2',
+      kind: 'preference',
+      title: 'Citation preference',
+      content: 'Always include PMID and DOI.',
+      source: 'manual',
+    });
+
+    recordMemoryHit({
+      chatJid: 'dc:123',
+      groupFolder: 'discord-dm-2',
+      sessionId: 'session-1',
+      round: 3,
+      memoryEntryId: memoryId,
+      injectionLayer: 'durable',
+      reason: 'matched keywords',
+      tokenCount: 48,
+    });
+
+    const memory = getMemoryEntry(memoryId);
+    expect(memory?.hitCount).toBe(1);
+    expect(memory?.lastAccessedAt).toBeTruthy();
+
+    const hits = getMemoryHits({ chatJid: 'dc:123' });
+    expect(hits).toHaveLength(1);
+    expect(hits[0].memoryEntryId).toBe(memoryId);
+    expect(hits[0].memoryTitle).toBe('Citation preference');
+    expect(hits[0].memoryKind).toBe('preference');
+    expect(hits[0].round).toBe(3);
+    expect(hits[0].injectionLayer).toBe('durable');
+  });
+
+  it('upserts by external id for container-synced memory records', () => {
+    const firstId = upsertMemoryEntryByExternalId({
+      externalId: 'mem-1',
+      scope: 'group',
+      scopeId: 'discord-dm-3',
+      kind: 'fact',
+      title: 'Initial title',
+      content: 'Initial content',
+      source: 'tool',
+      tags: ['one'],
+    });
+
+    const secondId = upsertMemoryEntryByExternalId({
+      externalId: 'mem-1',
+      scope: 'group',
+      scopeId: 'discord-dm-3',
+      kind: 'fact',
+      title: 'Updated title',
+      content: 'Updated content',
+      source: 'tool',
+      tags: ['two'],
+      pinned: true,
+    });
+
+    expect(secondId).toBe(firstId);
+
+    const updated = getMemoryEntryByExternalId('mem-1');
+    expect(updated?.title).toBe('Updated title');
+    expect(updated?.content).toBe('Updated content');
+    expect(updated?.tags).toEqual(['two']);
+    expect(updated?.pinned).toBe(true);
+  });
+});
+
+describe('session summaries', () => {
+  it('stores and retrieves session summary snapshots', () => {
+    createSessionSummary({
+      sessionId: 'session-a',
+      groupFolder: 'discord-dm-1',
+      chatJid: 'dc:abc',
+      summaryType: 'rolling',
+      content: 'The user is comparing CRBN degraders.',
+      tokenCount: 212,
+      roundStart: 1,
+      roundEnd: 8,
+    });
+
+    createSessionSummary({
+      sessionId: 'session-a',
+      groupFolder: 'discord-dm-1',
+      chatJid: 'dc:abc',
+      summaryType: 'closing',
+      content: 'Session closed with follow-up items.',
+      tokenCount: 128,
+      roundStart: 1,
+      roundEnd: 10,
+    });
+
+    const summaries = getSessionSummaries({ sessionId: 'session-a' });
+    expect(summaries).toHaveLength(2);
+    expect(summaries[0].summaryType).toBe('closing');
+    expect(summaries[1].summaryType).toBe('rolling');
   });
 });
 

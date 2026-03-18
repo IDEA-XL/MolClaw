@@ -103,12 +103,12 @@ describe('formatMessages', () => {
 
 describe('TRIGGER_PATTERN', () => {
   it('matches @Bio at start of message', () => {
-    expect(TRIGGER_PATTERN.test('@Bio hello')).toBe(true);
+    expect(TRIGGER_PATTERN.test(`@${ASSISTANT_NAME} hello`)).toBe(true);
   });
 
   it('matches case-insensitively', () => {
-    expect(TRIGGER_PATTERN.test('@bio hello')).toBe(true);
-    expect(TRIGGER_PATTERN.test('@BIO hello')).toBe(true);
+    expect(TRIGGER_PATTERN.test(`@${ASSISTANT_NAME.toLowerCase()} hello`)).toBe(true);
+    expect(TRIGGER_PATTERN.test(`@${ASSISTANT_NAME.toUpperCase()} hello`)).toBe(true);
   });
 
   it('does not match when not at start of message', () => {
@@ -120,16 +120,16 @@ describe('TRIGGER_PATTERN', () => {
   });
 
   it('matches with word boundary before apostrophe', () => {
-    expect(TRIGGER_PATTERN.test("@Bio's thing")).toBe(true);
+    expect(TRIGGER_PATTERN.test(`@${ASSISTANT_NAME}'s thing`)).toBe(true);
   });
 
   it('matches @Bio alone (end of string is a word boundary)', () => {
-    expect(TRIGGER_PATTERN.test('@Bio')).toBe(true);
+    expect(TRIGGER_PATTERN.test(`@${ASSISTANT_NAME}`)).toBe(true);
   });
 
   it('matches with leading whitespace after trim', () => {
     // The actual usage trims before testing: TRIGGER_PATTERN.test(m.content.trim())
-    expect(TRIGGER_PATTERN.test('@Bio hey'.trim())).toBe(true);
+    expect(TRIGGER_PATTERN.test(`@${ASSISTANT_NAME} hey`.trim())).toBe(true);
   });
 });
 
@@ -235,7 +235,7 @@ describe('trigger gating (requiresTrigger interaction)', () => {
   });
 
   it('non-main group with requiresTrigger=true processes when trigger present', () => {
-    const msgs = [makeMsg({ content: '@Bio do something' })];
+    const msgs = [makeMsg({ content: `@${ASSISTANT_NAME} do something` })];
     expect(shouldProcess(false, true, msgs)).toBe(true);
   });
 

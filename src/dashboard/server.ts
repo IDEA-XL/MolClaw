@@ -11,6 +11,9 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getLatestContextEvent,
+  getMemoryHits,
+  getSessionSummaries,
+  listMemoryEntries,
   getRecentMessages,
 } from '../db.js';
 import { logger } from '../logger.js';
@@ -127,6 +130,51 @@ export function startDashboardServer(
         .filter((row) => row.event_type === 'context')
         .slice(0, limit);
       sendJson(res, 200, { events: rows.map(toParsedEvent) });
+      return;
+    }
+
+    if (reqUrl.pathname === '/api/memory') {
+      const scope = reqUrl.searchParams.get('scope') || undefined;
+      const scopeId = reqUrl.searchParams.get('scope_id') || undefined;
+      const kind = reqUrl.searchParams.get('kind') || undefined;
+      const includeArchived = reqUrl.searchParams.get('include_archived') === 'true';
+      const limit = parseLimit(reqUrl.searchParams.get('limit'), 100);
+      const memories = listMemoryEntries({
+        scope,
+        scopeId,
+        kind,
+        includeArchived,
+        limit,
+      });
+      sendJson(res, 200, { memories });
+      return;
+    }
+
+    if (reqUrl.pathname === '/api/memory-hits') {
+      const chatJid = reqUrl.searchParams.get('chat_jid') || undefined;
+      const sessionId = reqUrl.searchParams.get('session_id') || undefined;
+      const limit = parseLimit(reqUrl.searchParams.get('limit'), 100);
+      const hits = getMemoryHits({
+        chatJid,
+        sessionId,
+        limit,
+      });
+      sendJson(res, 200, { hits });
+      return;
+    }
+
+    if (reqUrl.pathname === '/api/session-summaries') {
+      const chatJid = reqUrl.searchParams.get('chat_jid') || undefined;
+      const sessionId = reqUrl.searchParams.get('session_id') || undefined;
+      const groupFolder = reqUrl.searchParams.get('group_folder') || undefined;
+      const limit = parseLimit(reqUrl.searchParams.get('limit'), 50);
+      const summaries = getSessionSummaries({
+        chatJid,
+        sessionId,
+        groupFolder,
+        limit,
+      });
+      sendJson(res, 200, { summaries });
       return;
     }
 

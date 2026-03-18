@@ -85,6 +85,13 @@ export interface AgentProgressEvent {
   trimmedMessageCount?: number;
   trimmedCharCount?: number;
   trimmedTokenCount?: number;
+  memoryHitCount?: number;
+  memoryHitIds?: string[];
+  pinnedMemoryCount?: number;
+  recentMemoryCount?: number;
+  matchedMemoryCount?: number;
+  durableMemoryTokenCount?: number;
+  sessionSummaryTokenCount?: number;
   promptTokenCount?: number;
   completionTokenCount?: number;
   totalTokenCount?: number;
@@ -271,6 +278,7 @@ function buildVolumeMounts(
   const groupIpcDir = path.join(DATA_DIR, 'ipc', group.folder);
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
+  fs.mkdirSync(path.join(groupIpcDir, 'memory'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'files'), { recursive: true });
   mounts.push({
@@ -341,6 +349,10 @@ function readSecrets(): Record<string, string> {
     'OPENAI_COMPAT_SUPPORTS_IMAGE',
     'OPENAI_COMPAT_INLINE_IMAGE_MAX_BYTES',
     'OPENAI_COMPAT_INLINE_IMAGE_MAX_COUNT',
+    'BIOCLAW_DURABLE_MEMORY_PINNED_TOKENS',
+    'BIOCLAW_DURABLE_MEMORY_RECENT_TOKENS',
+    'BIOCLAW_DURABLE_MEMORY_MATCHED_TOKENS',
+    'BIOCLAW_SESSION_SUMMARY_TOKENS',
     'LLM_BASE_URL',
     'LLM_API_KEY',
     'LLM_MODEL',

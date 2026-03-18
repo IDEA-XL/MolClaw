@@ -11,7 +11,16 @@ import {
   TIMEZONE,
 } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import {
+  createSessionSummary,
+  createTask,
+  deleteTask,
+  getMemoryEntryByExternalId,
+  getTaskById,
+  recordMemoryHit,
+  updateTask,
+  upsertMemoryEntryByExternalId,
+} from './db.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
@@ -62,6 +71,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
       const isMain = sourceGroup === MAIN_GROUP_FOLDER;
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
+      const memoryDir = path.join(ipcBaseDir, sourceGroup, 'memory');
 
       // Process messages from this group's IPC directory
       try {
@@ -171,6 +181,116 @@ export function startIpcWatcher(deps: IpcDeps): void {
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+
+      try {
+        if (fs.existsSync(memoryDir)) {
+          const memoryFiles = fs
+            .readdirSync(memoryDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of memoryFiles) {
+            const filePath = path.join(memoryDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as
+                | {
+                    type: 'memory_saved';
+                    externalId: string;
+                    scope: string;
+                    scopeId: string;
+                    kind: string;
+                    title?: string;
+                    content: string;
+                    tags?: string[];
+                    source: string;
+                    pinned?: boolean;
+                    archived?: boolean;
+                    createdAt?: string;
+                    updatedAt?: string;
+                  }
+                | {
+                    type: 'memory_hit';
+                    externalId: string;
+                    chatJid: string;
+                    groupFolder: string;
+                    sessionId?: string;
+                    round?: number;
+                    injectionLayer: string;
+                    reason?: string;
+                    tokenCount?: number;
+                    ts?: string;
+                  }
+                | {
+                    type: 'session_summary_saved';
+                    sessionId: string;
+                    groupFolder: string;
+                    chatJid: string;
+                    summaryType: string;
+                    content: string;
+                    tokenCount?: number;
+                    roundStart?: number;
+                    roundEnd?: number;
+                    createdAt?: string;
+                  };
+
+              if (data.type === 'memory_saved') {
+                upsertMemoryEntryByExternalId({
+                  externalId: data.externalId,
+                  scope: data.scope,
+                  scopeId: data.scopeId,
+                  kind: data.kind,
+                  title: data.title,
+                  content: data.content,
+                  tags: data.tags,
+                  source: data.source,
+                  pinned: data.pinned,
+                  archived: data.archived,
+                  createdAt: data.createdAt,
+                  updatedAt: data.updatedAt,
+                });
+              } else if (data.type === 'memory_hit') {
+                const memory = getMemoryEntryByExternalId(data.externalId);
+                recordMemoryHit({
+                  ts: data.ts,
+                  chatJid: data.chatJid,
+                  groupFolder: data.groupFolder,
+                  sessionId: data.sessionId,
+                  round: data.round,
+                  memoryEntryId: memory?.id,
+                  injectionLayer: data.injectionLayer,
+                  reason: data.reason,
+                  tokenCount: data.tokenCount,
+                });
+              } else if (data.type === 'session_summary_saved') {
+                createSessionSummary({
+                  sessionId: data.sessionId,
+                  groupFolder: data.groupFolder,
+                  chatJid: data.chatJid,
+                  summaryType: data.summaryType,
+                  content: data.content,
+                  tokenCount: data.tokenCount,
+                  roundStart: data.roundStart,
+                  roundEnd: data.roundEnd,
+                  createdAt: data.createdAt,
+                });
+              }
+
+              fs.unlinkSync(filePath);
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing IPC memory payload',
+              );
+              const errorDir = path.join(ipcBaseDir, 'errors');
+              fs.mkdirSync(errorDir, { recursive: true });
+              fs.renameSync(
+                filePath,
+                path.join(errorDir, `${sourceGroup}-${file}`),
+              );
+            }
+          }
+        }
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'Error reading IPC memory directory');
       }
     }
 

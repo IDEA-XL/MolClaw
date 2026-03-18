@@ -28,6 +28,17 @@ import {
   isSkillToolName,
   serializeToolExecutionResult,
 } from './tool-results.js';
+import {
+  buildDefaultMemoryScopes,
+  getMemoryEntryById,
+  renderMemoryContextBlock,
+  saveMemoryEntry,
+  selectMemoryForPrompt,
+  searchMemoryEntries,
+  type MemoryEntry,
+  type MemoryScopeDescriptor,
+  type MemorySearchScope,
+} from './memory.js';
 
 interface ContainerInput {
   prompt: string;
@@ -81,6 +92,13 @@ interface AgentProgressEvent {
   trimmedMessageCount?: number;
   trimmedCharCount?: number;
   trimmedTokenCount?: number;
+  memoryHitCount?: number;
+  memoryHitIds?: string[];
+  pinnedMemoryCount?: number;
+  recentMemoryCount?: number;
+  matchedMemoryCount?: number;
+  durableMemoryTokenCount?: number;
+  sessionSummaryTokenCount?: number;
   promptTokenCount?: number;
   completionTokenCount?: number;
   totalTokenCount?: number;
@@ -181,6 +199,13 @@ interface ProviderMessageMaterializationResult {
 interface SessionState {
   sessionId: string;
   messages: ChatMessage[];
+  rollingSummary?: {
+    content: string;
+    tokenCount: number;
+    roundStart: number;
+    roundEnd: number;
+    updatedAt: string;
+  };
   createdAt: string;
   updatedAt: string;
 }
@@ -231,6 +256,9 @@ interface ToolContext {
   containerInput: ContainerInput;
   readableRoots: string[];
   writableRoots: string[];
+  memoryScopes: MemoryScopeDescriptor[];
+  sessionId?: string;
+  currentRound?: number;
   claudeSkillRegistry: ClaudeSkillRegistry;
   claudeSkillInvocationHints: Map<string, ClaudeSkillInvocationHint>;
 }
@@ -315,6 +343,7 @@ const IPC_POLL_MS = 500;
 const FILES_DIR = path.join(IPC_DIR, 'files');
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const MEMORY_DIR = path.join(IPC_DIR, 'memory');
 const SESSION_DIR = '/home/node/.claude/openai-sessions';
 const CONVERSATIONS_DIR = '/workspace/group/conversations';
 const MAX_TOOL_ROUNDS = 24;
@@ -332,6 +361,20 @@ const INLINE_IMAGE_MAX_BYTES = Math.max(
   ) || DEFAULT_INLINE_IMAGE_MAX_BYTES,
 );
 const DEFAULT_INLINE_IMAGE_MAX_COUNT = 3;
+const ROLLING_SUMMARY_TRIGGER_TOKENS = Math.max(
+  4_000,
+  parseInt(
+    process.env.BIOCLAW_ROLLING_SUMMARY_TRIGGER_TOKENS || '24000',
+    10,
+  ) || 24_000,
+);
+const ROLLING_SUMMARY_TAIL_MESSAGES = Math.max(
+  4,
+  parseInt(
+    process.env.BIOCLAW_ROLLING_SUMMARY_TAIL_MESSAGES || '10',
+    10,
+  ) || 10,
+);
 const INLINE_IMAGE_MAX_COUNT = Math.max(
   1,
   parseInt(
@@ -470,6 +513,95 @@ const CORE_TOOL_DEFINITIONS: ToolDefinition[] = [
           case_insensitive: { type: 'boolean', description: 'Whether the regex should be case-insensitive.' },
         },
         required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'save_memory',
+      description:
+        'Save durable information that should persist beyond the current round or session.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: {
+            type: 'string',
+            description: 'Short memory title.',
+          },
+          content: {
+            type: 'string',
+            description: 'Durable memory content to store.',
+          },
+          kind: {
+            type: 'string',
+            description: 'Memory kind such as preference, rule, fact, project_context, artifact_note, or summary.',
+          },
+          scope: {
+            type: 'string',
+            description: 'Where to store the memory.',
+            enum: ['group', 'global', 'project'],
+          },
+          tags: {
+            type: 'array',
+            description: 'Optional tags used for later retrieval.',
+            items: { type: 'string' },
+          },
+          pinned: {
+            type: 'boolean',
+            description: 'Pinned memories should be preferred during future retrieval.',
+          },
+          source: {
+            type: 'string',
+            description: 'Optional provenance label such as tool, manual, imported, or session_rollup.',
+          },
+        },
+        required: ['title', 'content', 'kind'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_search',
+      description:
+        'Search durable memory broadly and return lightweight candidates. Use memory_get(id) to fetch full content.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Broad query string for tolerant memory retrieval.',
+          },
+          scope: {
+            type: 'string',
+            description: 'Optional scope filter. Defaults to all accessible scopes.',
+            enum: ['all', 'group', 'global', 'project'],
+          },
+          limit: {
+            type: 'integer',
+            description: 'Maximum results to return (1-20, default 5).',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_get',
+      description:
+        'Fetch one durable memory entry by id and return its full content.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            description: 'Memory entry id returned by memory_search.',
+          },
+        },
+        required: ['id'],
       },
     },
   },
@@ -633,12 +765,28 @@ function buildToolDefinitions(skillTool: ToolDefinition | null): ToolDefinition[
     : CORE_TOOL_DEFINITIONS;
 }
 
+function getCoreToolDefinition(toolName: string): ToolDefinition {
+  const tool = CORE_TOOL_DEFINITIONS.find(
+    (definition) => definition.function.name === toolName,
+  );
+  if (!tool) {
+    throw new Error(`Missing core tool definition: ${toolName}`);
+  }
+  return tool;
+}
+
 type ToolExecutor = (args: Record<string, unknown>, context: ToolContext) => Promise<unknown>;
 
 interface ToolExecutionResult {
   output: string;
   modelContent: string;
   success: boolean;
+}
+
+interface RollingSummaryUpdate {
+  summary: NonNullable<SessionState['rollingSummary']>;
+  removedMessageCount: number;
+  retainedMessageCount: number;
 }
 
 interface ActiveLoadedSkill {
@@ -730,6 +878,36 @@ function ensureBoolean(value: unknown, defaultValue = false): boolean {
     return value;
   }
   return defaultValue;
+}
+
+function ensureStringArray(value: unknown, fieldName: string): string[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${fieldName} must be an array of strings`);
+  }
+  const normalized = value.map((entry) => {
+    if (typeof entry !== 'string') {
+      throw new Error(`${fieldName} must be an array of strings`);
+    }
+    return entry.trim();
+  }).filter((entry) => entry.length > 0);
+  return [...new Set(normalized)];
+}
+
+function ensureEnumValue<T extends string>(
+  value: unknown,
+  fieldName: string,
+  allowedValues: readonly T[],
+): T {
+  const normalized = ensureString(value, fieldName) as T;
+  if (!allowedValues.includes(normalized)) {
+    throw new Error(
+      `${fieldName} must be one of: ${allowedValues.join(', ')}`,
+    );
+  }
+  return normalized;
 }
 
 function ensureInteger(
@@ -1008,6 +1186,7 @@ function createToolContext(
   const writableRoots = ['/workspace/group'];
 
   if (containerInput.isMain) {
+    writableRoots.push('/workspace/global');
     readableRoots.push('/workspace/project');
     writableRoots.push('/workspace/project');
   }
@@ -1016,6 +1195,11 @@ function createToolContext(
     containerInput,
     readableRoots,
     writableRoots,
+    memoryScopes: buildDefaultMemoryScopes({
+      groupFolder: containerInput.groupFolder,
+      readableRoots,
+      writableRoots,
+    }),
     claudeSkillRegistry,
     claudeSkillInvocationHints: new Map(),
   };
@@ -1380,6 +1564,299 @@ function enqueueNoticeMessage(containerInput: ContainerInput, text: string): voi
     groupFolder: containerInput.groupFolder,
     timestamp: new Date().toISOString(),
   });
+}
+
+function writeMemoryIpcFile(data: object): string {
+  return writeIpcFile(MEMORY_DIR, data);
+}
+
+function emitMemorySaved(entry: {
+  externalId: string;
+  scope: string;
+  scopeId: string;
+  kind: string;
+  title: string;
+  content: string;
+  tags: string[];
+  source: string;
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+}): void {
+  writeMemoryIpcFile({
+    type: 'memory_saved',
+    externalId: entry.externalId,
+    scope: entry.scope,
+    scopeId: entry.scopeId,
+    kind: entry.kind,
+    title: entry.title,
+    content: entry.content,
+    tags: entry.tags,
+    source: entry.source,
+    pinned: entry.pinned,
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+  });
+}
+
+function emitMemoryHit(data: {
+  externalId: string;
+  chatJid: string;
+  groupFolder: string;
+  sessionId?: string;
+  round?: number;
+  injectionLayer: string;
+  reason: string;
+  tokenCount: number;
+}): void {
+  writeMemoryIpcFile({
+    type: 'memory_hit',
+    ...data,
+    ts: new Date().toISOString(),
+  });
+}
+
+function emitSessionSummarySaved(data: {
+  sessionId: string;
+  groupFolder: string;
+  chatJid: string;
+  summaryType: string;
+  content: string;
+  tokenCount: number;
+  roundStart: number;
+  roundEnd: number;
+}): void {
+  writeMemoryIpcFile({
+    type: 'session_summary_saved',
+    ...data,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+function buildSilentFlushPrompt(input: {
+  previousSummary?: string;
+  olderContext: string;
+  anchorContext: string;
+}): string {
+  return [
+    'You are performing a silent memory compaction pass.',
+    'Your job is to extract only durable facts, preferences, rules, workflows, or project context that should persist beyond this transient session.',
+    'You must act silently.',
+    'Only emit tool calls.',
+    'Do not emit conversational text.',
+    'Do not explain what you are doing.',
+    'If nothing is worth saving, emit no tool calls.',
+    'Use save_memory for each durable item you decide to persist.',
+    'Prefer concise, high-value memory entries over verbose notes.',
+    '',
+    input.previousSummary
+      ? `<existing_session_summary>\n${input.previousSummary}\n</existing_session_summary>`
+      : '',
+    `<older_context_to_compact>\n${input.olderContext}\n</older_context_to_compact>`,
+    `<recent_anchor_context>\n${input.anchorContext}\n</recent_anchor_context>`,
+  ].filter(Boolean).join('\n\n');
+}
+
+async function runSilentMemoryFlush(options: {
+  session: SessionState;
+  olderMessages: ChatMessage[];
+  anchorMessages: ChatMessage[];
+  toolContext: ToolContext;
+  providerConfig: ProviderConfig;
+  roundNumber: number;
+  systemPrompt: ChatMessage;
+}): Promise<number> {
+  const saveMemoryTool = getCoreToolDefinition('save_memory');
+  const flushPrompt = buildSilentFlushPrompt({
+    previousSummary: options.session.rollingSummary?.content,
+    olderContext: summarizeMessagesForRollingContext(options.olderMessages),
+    anchorContext: summarizeMessagesForRollingContext(options.anchorMessages.slice(0, 2)),
+  });
+
+  const flushMessages: ChatMessage[] = [
+    options.systemPrompt,
+    {
+      role: 'user',
+      content: flushPrompt,
+    },
+  ];
+
+  const response = await callChatCompletion(
+    options.providerConfig,
+    flushMessages,
+    [saveMemoryTool],
+  );
+
+  let executed = 0;
+  for (const toolCall of response.toolCalls) {
+    if (toolCall.function.name !== 'save_memory') {
+      continue;
+    }
+    executed += 1;
+    writeProgress({
+      type: 'tool',
+      stage: 'start',
+      round: options.roundNumber,
+      toolName: 'save_memory',
+      toolCallId: toolCall.id,
+      argsSummary: summarizeToolArgs(toolCall.function.arguments || '{}'),
+      toolArgs: parseToolArgs(toolCall.function.arguments || '{}') || undefined,
+      message: 'silent_memory_flush',
+    }, options.session.sessionId);
+
+    const startedAt = Date.now();
+    options.toolContext.sessionId = options.session.sessionId;
+    options.toolContext.currentRound = options.roundNumber;
+    const toolResult = await executeToolCall(toolCall, options.toolContext);
+    writeProgress({
+      type: 'tool',
+      stage: toolResult.success ? 'end' : 'error',
+      round: options.roundNumber,
+      toolName: 'save_memory',
+      toolCallId: toolCall.id,
+      durationMs: Date.now() - startedAt,
+      success: toolResult.success,
+      outputPreview: truncate(toolResult.output, 4000),
+      output: truncate(toolResult.output, 4000),
+      message: 'silent_memory_flush',
+    }, options.session.sessionId);
+  }
+
+  if (!response.toolCalls.length && response.content.trim()) {
+    writeProgress({
+      type: 'lifecycle',
+      stage: 'info',
+      round: options.roundNumber,
+      message: 'silent_memory_flush_returned_text_ignored',
+      contentPreview: truncate(response.content, 1200),
+    }, options.session.sessionId);
+  }
+
+  return executed;
+}
+
+function summarizeMessagesForRollingContext(messages: ChatMessage[]): string {
+  const lines: string[] = [];
+
+  for (const message of messages) {
+    if (message.role === 'system') {
+      continue;
+    }
+    if (message.role === 'tool') {
+      lines.push(
+        `Tool ${message.name || 'unknown'} -> ${truncate(message.content || '', 400)}`,
+      );
+      continue;
+    }
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      lines.push(
+        `Assistant tool calls: ${message.tool_calls.map((call) => call.function.name).join(', ')}`,
+      );
+      continue;
+    }
+    const roleLabel = message.role === 'user' ? 'User' : 'Assistant';
+    lines.push(`${roleLabel}: ${truncate(message.content || '', 600)}`);
+  }
+
+  return lines.join('\n');
+}
+
+async function maybeUpdateRollingSummary(
+  session: SessionState,
+  containerInput: ContainerInput,
+  toolContext: ToolContext,
+  providerConfig: ProviderConfig,
+  systemPrompt: ChatMessage,
+  roundEnd: number,
+): Promise<RollingSummaryUpdate | null> {
+  if (getMessagesTokenCount(session.messages) <= ROLLING_SUMMARY_TRIGGER_TOKENS) {
+    return null;
+  }
+
+  const tailMessages = Math.min(ROLLING_SUMMARY_TAIL_MESSAGES, session.messages.length);
+  const olderMessages = session.messages.slice(0, Math.max(0, session.messages.length - tailMessages));
+  if (olderMessages.length === 0) {
+    return null;
+  }
+
+  const anchorMessages = session.messages.slice(
+    Math.max(0, session.messages.length - tailMessages),
+  );
+  const removedMessageCount = olderMessages.length;
+  const previousSummary = session.rollingSummary?.content?.trim();
+  const olderSummary = summarizeMessagesForRollingContext(olderMessages);
+  const anchorSummary = summarizeMessagesForRollingContext(anchorMessages.slice(0, 2));
+  const parts = [
+    previousSummary ? `Previous summary:\n${previousSummary}` : null,
+    olderSummary ? `Compressed older context:\n${olderSummary}` : null,
+    anchorSummary ? `Anchor to recent context:\n${anchorSummary}` : null,
+  ].filter((part): part is string => !!part);
+
+  if (parts.length === 0) {
+    return null;
+  }
+
+  let savedCount = 0;
+  try {
+    savedCount = await runSilentMemoryFlush({
+      session,
+      olderMessages,
+      anchorMessages,
+      toolContext,
+      providerConfig,
+      roundNumber: roundEnd,
+      systemPrompt,
+    });
+  } catch (err) {
+    writeProgress({
+      type: 'lifecycle',
+      stage: 'error',
+      round: roundEnd,
+      message: 'silent_memory_flush_failed',
+      contentPreview: truncate(
+        err instanceof Error ? err.message : String(err),
+        1200,
+      ),
+    }, session.sessionId);
+  }
+
+  const content = truncate(parts.join('\n\n'), 12_000);
+  const tokenCount = estimateTokenCount(content);
+  const priorRoundStart = session.rollingSummary?.roundStart ?? 1;
+  session.rollingSummary = {
+    content,
+    tokenCount,
+    roundStart: priorRoundStart,
+    roundEnd,
+    updatedAt: new Date().toISOString(),
+  };
+
+  emitSessionSummarySaved({
+    sessionId: session.sessionId,
+    groupFolder: containerInput.groupFolder,
+    chatJid: containerInput.chatJid,
+    summaryType: 'rolling',
+    content,
+    tokenCount,
+    roundStart: session.rollingSummary.roundStart,
+    roundEnd,
+  });
+  session.messages = anchorMessages;
+
+  writeProgress({
+    type: 'context',
+    stage: 'info',
+    round: roundEnd,
+    message: 'silent_memory_flush_completed',
+    toolCalls: savedCount,
+    contentPreview: `saved_memories=${savedCount} removed_messages=${removedMessageCount} retained_messages=${anchorMessages.length}`,
+  }, session.sessionId);
+
+  return {
+    summary: session.rollingSummary,
+    removedMessageCount,
+    retainedMessageCount: anchorMessages.length,
+  };
 }
 
 function sessionFilePath(sessionId: string): string {
@@ -1980,6 +2457,7 @@ function buildSystemPrompt(containerInput: ContainerInput): string {
       'If a relevant skill is available from /home/node/.claude/skills, invoke the skill tool before continuing with normal tools.',
       'Use send_message for progress updates during long jobs.',
       'Use send_image after generating plots or structure renders.',
+      'When calling save_memory, prefer scope="group" by default. Only use scope="global" or scope="project" if that scope is clearly writable in the current runtime.',
       'Keep WhatsApp replies clean: no markdown headings, prefer short paragraphs or bullet lists.',
       'Tool results and user messages may include <system-reminder> tags. These tags contain internal reminders and are not part of the user request.',
       'If part of your output is internal reasoning, wrap it in <internal> tags.',
@@ -1990,6 +2468,280 @@ function buildSystemPrompt(containerInput: ContainerInput): string {
   ];
 
   return fragments.join('\n\n');
+}
+
+interface PromptMemoryBudgetConfig {
+  pinnedTokens: number;
+  recentTokens: number;
+  matchedTokens: number;
+  sessionSummaryTokens: number;
+}
+
+interface BudgetedMemorySelection {
+  entries: MemoryEntry[];
+  tokenCount: number;
+}
+
+function readBoundedIntegerConfig(
+  containerInput: ContainerInput,
+  keys: string[],
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const raw = readConfigValue(containerInput, keys);
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function getPromptMemoryBudgetConfig(
+  containerInput: ContainerInput,
+): PromptMemoryBudgetConfig {
+  return {
+    pinnedTokens: readBoundedIntegerConfig(
+      containerInput,
+      ['BIOCLAW_DURABLE_MEMORY_PINNED_TOKENS'],
+      1_000,
+      200,
+      6_000,
+    ),
+    recentTokens: readBoundedIntegerConfig(
+      containerInput,
+      ['BIOCLAW_DURABLE_MEMORY_RECENT_TOKENS'],
+      800,
+      200,
+      6_000,
+    ),
+    matchedTokens: readBoundedIntegerConfig(
+      containerInput,
+      ['BIOCLAW_DURABLE_MEMORY_MATCHED_TOKENS'],
+      1_400,
+      200,
+      8_000,
+    ),
+    sessionSummaryTokens: readBoundedIntegerConfig(
+      containerInput,
+      ['BIOCLAW_SESSION_SUMMARY_TOKENS'],
+      2_000,
+      200,
+      8_000,
+    ),
+  };
+}
+
+function estimateMemoryEntryTokens(entry: MemoryEntry): number {
+  return estimateTokenCount(
+    [entry.title, entry.kind, entry.content].filter(Boolean).join('\n'),
+  );
+}
+
+function fitMemoryEntriesToTokenBudget(
+  entries: MemoryEntry[],
+  tokenBudget: number,
+): BudgetedMemorySelection {
+  const selected: MemoryEntry[] = [];
+  let tokenCount = 0;
+
+  for (const entry of entries) {
+    const entryTokens = estimateMemoryEntryTokens(entry);
+    if (selected.length > 0 && tokenCount + entryTokens > tokenBudget) {
+      continue;
+    }
+    selected.push(entry);
+    tokenCount += entryTokens;
+    if (tokenCount >= tokenBudget) {
+      break;
+    }
+  }
+
+  return {
+    entries: selected,
+    tokenCount,
+  };
+}
+
+function truncateTextToTokenBudget(
+  text: string,
+  tokenBudget: number,
+): { content: string; tokenCount: number } {
+  const normalized = text.trim();
+  const tokenCount = estimateTokenCount(normalized);
+  if (!normalized || tokenCount <= tokenBudget) {
+    return {
+      content: normalized,
+      tokenCount,
+    };
+  }
+
+  const maxChars = Math.max(400, tokenBudget * 4);
+  const truncated = [
+    normalized.slice(0, maxChars),
+    `...[truncated to fit ${tokenBudget} tokens from ~${tokenCount} tokens]`,
+  ].join('\n');
+  return {
+    content: truncated,
+    tokenCount: estimateTokenCount(truncated),
+  };
+}
+
+function summarizePromptForMemoryReason(prompt: string): string {
+  const normalized = prompt
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) {
+    return 'matched prompt keywords';
+  }
+  return `matched query: ${truncate(normalized, 180)}`;
+}
+
+function buildMemoryAwarePromptMessages(
+  systemPrompt: ChatMessage,
+  session: SessionState,
+  toolContext: ToolContext,
+  roundNumber: number,
+): {
+  providerMessages: ChatMessage[];
+  pinnedMemoryCount: number;
+  recentMemoryCount: number;
+  matchedMemoryCount: number;
+  pinnedMemoryTokenCount: number;
+  recentMemoryTokenCount: number;
+  matchedMemoryTokenCount: number;
+  sessionSummaryTokenCount: number;
+  hitIds: string[];
+} {
+  const recentUserPrompt = [...session.messages]
+    .reverse()
+    .find((message) => message.role === 'user' && typeof message.content === 'string')
+    ?.content || '';
+  const memoryReason = summarizePromptForMemoryReason(recentUserPrompt);
+  const budgetConfig = getPromptMemoryBudgetConfig(toolContext.containerInput);
+  const memorySelection = selectMemoryForPrompt(toolContext.memoryScopes, {
+    query: recentUserPrompt,
+    maxPinned: 6,
+    maxRecent: 4,
+    maxMatched: 6,
+  });
+  const pinnedSelection = fitMemoryEntriesToTokenBudget(
+    memorySelection.pinned,
+    budgetConfig.pinnedTokens,
+  );
+  const recentSelection = fitMemoryEntriesToTokenBudget(
+    memorySelection.recent,
+    budgetConfig.recentTokens,
+  );
+  const matchedSelection = fitMemoryEntriesToTokenBudget(
+    memorySelection.matched,
+    budgetConfig.matchedTokens,
+  );
+
+  const memoryMessages: ChatMessage[] = [];
+  const hitIds: string[] = [];
+
+  const pinnedBlock = renderMemoryContextBlock(
+    'durable_memory_pinned',
+    pinnedSelection.entries,
+  );
+  if (pinnedBlock) {
+    memoryMessages.push({
+      role: 'system',
+      content: pinnedBlock,
+    });
+    for (const entry of pinnedSelection.entries) {
+      hitIds.push(entry.id);
+      emitMemoryHit({
+        externalId: entry.id,
+        chatJid: toolContext.containerInput.chatJid,
+        groupFolder: toolContext.containerInput.groupFolder,
+        sessionId: session.sessionId,
+        round: roundNumber,
+        injectionLayer: 'durable_pinned',
+        reason: 'pinned durable memory',
+        tokenCount: estimateTokenCount(entry.content),
+      });
+    }
+  }
+
+  const recentBlock = renderMemoryContextBlock(
+    'durable_memory_recent',
+    recentSelection.entries,
+  );
+  if (recentBlock) {
+    memoryMessages.push({
+      role: 'system',
+      content: recentBlock,
+    });
+    for (const entry of recentSelection.entries) {
+      hitIds.push(entry.id);
+      emitMemoryHit({
+        externalId: entry.id,
+        chatJid: toolContext.containerInput.chatJid,
+        groupFolder: toolContext.containerInput.groupFolder,
+        sessionId: session.sessionId,
+        round: roundNumber,
+        injectionLayer: 'durable_recent',
+        reason: 'recent durable memory',
+        tokenCount: estimateTokenCount(entry.content),
+      });
+    }
+  }
+
+  const matchedBlock = renderMemoryContextBlock(
+    'durable_memory_matches',
+    matchedSelection.entries,
+  );
+  if (matchedBlock) {
+    memoryMessages.push({
+      role: 'system',
+      content: matchedBlock,
+    });
+    for (const entry of matchedSelection.entries) {
+      hitIds.push(entry.id);
+      emitMemoryHit({
+        externalId: entry.id,
+        chatJid: toolContext.containerInput.chatJid,
+        groupFolder: toolContext.containerInput.groupFolder,
+        sessionId: session.sessionId,
+        round: roundNumber,
+        injectionLayer: 'durable_search',
+        reason: memoryReason,
+        tokenCount: estimateTokenCount(entry.content),
+      });
+    }
+  }
+
+  let sessionSummaryTokenCount = 0;
+  if (session.rollingSummary?.content) {
+    const summaryContent = truncateTextToTokenBudget(
+      session.rollingSummary.content,
+      budgetConfig.sessionSummaryTokens,
+    );
+    sessionSummaryTokenCount = summaryContent.tokenCount;
+    memoryMessages.push({
+      role: 'system',
+      content: [
+        '<current_session_summary>',
+        `rounds: ${session.rollingSummary.roundStart}-${session.rollingSummary.roundEnd}`,
+        summaryContent.content,
+        '</current_session_summary>',
+      ].join('\n'),
+    });
+  }
+
+  return {
+    providerMessages: [systemPrompt, ...memoryMessages],
+    pinnedMemoryCount: pinnedSelection.entries.length,
+    recentMemoryCount: recentSelection.entries.length,
+    matchedMemoryCount: matchedSelection.entries.length,
+    pinnedMemoryTokenCount: pinnedSelection.tokenCount,
+    recentMemoryTokenCount: recentSelection.tokenCount,
+    matchedMemoryTokenCount: matchedSelection.tokenCount,
+    sessionSummaryTokenCount,
+    hitIds,
+  };
 }
 
 function isImageUnsupportedError(message: string): boolean {
@@ -2375,6 +3127,148 @@ const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
     return searchPubMed(query, maxResults);
   },
 
+  async save_memory(args, context) {
+    const title = ensureString(args.title, 'title');
+    const content = ensureString(args.content, 'content');
+    const kind = ensureString(args.kind, 'kind');
+    const requestedScope = typeof args.scope === 'string'
+      ? ensureEnumValue(
+        args.scope,
+        'scope',
+        ['group', 'global', 'project'] as const,
+      ) as MemoryScopeDescriptor['scope']
+      : undefined;
+    const tags = ensureStringArray(args.tags, 'tags');
+    const pinned = ensureBoolean(args.pinned);
+    const source = typeof args.source === 'string'
+      ? ensureString(args.source, 'source')
+      : undefined;
+
+    const writableScopes = context.memoryScopes
+      .filter((entry) => entry.writable)
+      .map((entry) => entry.scope);
+    let effectiveScope = requestedScope;
+    let scopeNotice: string | null = null;
+
+    if (requestedScope && !writableScopes.includes(requestedScope)) {
+      if (writableScopes.includes('group')) {
+        effectiveScope = 'group';
+        scopeNotice = `Requested scope ${requestedScope} is not writable in this runtime; saved to group instead.`;
+      } else {
+        throw new Error(
+          `Memory scope is not writable: ${requestedScope}. Writable scopes: ${writableScopes.join(', ') || '(none)'}`,
+        );
+      }
+    }
+
+    const saved = saveMemoryEntry(context.memoryScopes, {
+      title,
+      content,
+      kind,
+      scope: effectiveScope,
+      tags,
+      pinned,
+      source,
+    });
+    emitMemorySaved({
+      externalId: saved.entry.id,
+      scope: saved.entry.scope,
+      scopeId: saved.entry.scopeId,
+      kind: saved.entry.kind,
+      title: saved.entry.title,
+      content: saved.entry.content,
+      tags: saved.entry.tags,
+      source: saved.entry.source,
+      pinned: saved.entry.pinned,
+      createdAt: saved.entry.createdAt,
+      updatedAt: saved.entry.updatedAt,
+    });
+
+    return [
+      `Saved memory ${saved.entry.id}`,
+      scopeNotice,
+      requestedScope ? `requested_scope: ${requestedScope}` : null,
+      `scope: ${saved.entry.scope} (${saved.entry.scopeId})`,
+      `kind: ${saved.entry.kind}`,
+      `title: ${saved.entry.title}`,
+      saved.entry.tags.length > 0 ? `tags: ${saved.entry.tags.join(', ')}` : null,
+      `pinned: ${saved.entry.pinned ? 'yes' : 'no'}`,
+      `memory_file: ${saved.memoryFilePath}`,
+      `daily_log: ${saved.dailyLogPath}`,
+    ].filter((line): line is string => line !== null).join('\n');
+  },
+
+  async memory_search(args, context) {
+    const query = ensureString(args.query, 'query');
+    const scope = typeof args.scope === 'string'
+      ? ensureEnumValue(
+        args.scope,
+        'scope',
+        ['all', 'group', 'global', 'project'] as const,
+      ) as MemorySearchScope
+      : 'all';
+    const limit = ensureInteger(args.limit, 'limit', 5, 1, 20);
+    const results = searchMemoryEntries(context.memoryScopes, {
+      query,
+      scope,
+      limit,
+    });
+
+    if (results.length === 0) {
+      return `No memory matches found for query: ${query}`;
+    }
+
+    return [
+      `Found ${results.length} memory match(es) for: ${query}`,
+      '',
+      ...results.flatMap((result, index) => [
+        `${index + 1}. [${result.id}] ${result.title}`,
+        `scope: ${result.scope} (${result.scopeId})`,
+        `kind: ${result.kind}`,
+        `score: ${result.score}`,
+        `pinned: ${result.pinned ? 'yes' : 'no'}`,
+        `updated_at: ${result.updatedAt}`,
+        `preview: ${result.shortPreview}`,
+        '',
+      ]),
+    ].join('\n').trim();
+  },
+
+  async memory_get(args, context) {
+    const id = ensureString(args.id, 'id');
+    const entry = getMemoryEntryById(context.memoryScopes, id);
+    if (!entry) {
+      throw new Error(`Memory entry not found: ${id}`);
+    }
+
+    emitMemoryHit({
+      externalId: entry.id,
+      chatJid: context.containerInput.chatJid,
+      groupFolder: context.containerInput.groupFolder,
+      sessionId: context.sessionId,
+      round: context.currentRound,
+      injectionLayer: 'memory_get',
+      reason: 'tool requested full durable memory entry',
+      tokenCount: estimateMemoryEntryTokens(entry),
+    });
+
+    return [
+      `id: ${entry.id}`,
+      `title: ${entry.title}`,
+      `scope: ${entry.scope} (${entry.scopeId})`,
+      `kind: ${entry.kind}`,
+      `source: ${entry.source}`,
+      `pinned: ${entry.pinned ? 'yes' : 'no'}`,
+      `created_at: ${entry.createdAt}`,
+      `updated_at: ${entry.updatedAt}`,
+      entry.tags.length > 0 ? `tags: ${entry.tags.join(', ')}` : null,
+      `file: ${entry.filePath}`,
+      '',
+      'content:',
+      entry.content,
+    ].filter((line): line is string => line !== null).join('\n');
+  },
+
   async send_message(args, context) {
     const text = ensureString(args.text, 'text');
     const sender = typeof args.sender === 'string' ? args.sender : undefined;
@@ -2622,6 +3516,8 @@ async function runQuery(
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const roundNumber = round + 1;
+    toolContext.sessionId = session.sessionId;
+    toolContext.currentRound = roundNumber;
     if (shouldClose()) {
       writeProgress(
         {
@@ -2755,6 +3651,41 @@ async function runQuery(
       trimmedCharCount: getMessagesCharCount(trimmedMessages),
       trimmedTokenCount: getMessagesTokenCount(trimmedMessages),
     }, session.sessionId);
+
+    const promptMemory = buildMemoryAwarePromptMessages(
+      systemPrompt,
+      session,
+      toolContext,
+      roundNumber,
+    );
+    writeProgress({
+      type: 'context',
+      stage: 'info',
+      round: roundNumber,
+      message: 'memory_context_assembled',
+      memoryHitCount: promptMemory.hitIds.length,
+      memoryHitIds: promptMemory.hitIds,
+      pinnedMemoryCount: promptMemory.pinnedMemoryCount,
+      recentMemoryCount: promptMemory.recentMemoryCount,
+      matchedMemoryCount: promptMemory.matchedMemoryCount,
+      durableMemoryTokenCount:
+        promptMemory.pinnedMemoryTokenCount
+        + promptMemory.recentMemoryTokenCount
+        + promptMemory.matchedMemoryTokenCount,
+      sessionSummaryTokenCount: promptMemory.sessionSummaryTokenCount,
+      contentPreview: truncate(
+        [
+          `pinned=${promptMemory.pinnedMemoryCount}`,
+          `recent=${promptMemory.recentMemoryCount}`,
+          `matched=${promptMemory.matchedMemoryCount}`,
+          `session_summary_tokens=${promptMemory.sessionSummaryTokenCount}`,
+          promptMemory.hitIds.length > 0
+            ? `memory_ids=${promptMemory.hitIds.join(', ')}`
+            : 'memory_ids=(none)',
+        ].join('\n'),
+        2400,
+      ),
+    }, session.sessionId);
     writeProgress({
       type: 'provider',
       stage: 'start',
@@ -2781,7 +3712,7 @@ async function runQuery(
     try {
       response = await callChatCompletion(
         providerConfig,
-        [systemPrompt, ...autoMaterializedSkills.messages, ...trimmedMessages],
+        [...promptMemory.providerMessages, ...autoMaterializedSkills.messages, ...trimmedMessages],
         dynamicTools,
       );
     } catch (err) {
@@ -2804,7 +3735,11 @@ async function runQuery(
       response.usage?.completionTokens ?? estimateTokenCount(completionText);
     const promptTokenCount =
       response.usage?.promptTokens ??
-      getMessagesTokenCount([systemPrompt, ...autoMaterializedSkills.messages, ...trimmedMessages]);
+      getMessagesTokenCount([
+        ...promptMemory.providerMessages,
+        ...autoMaterializedSkills.messages,
+        ...trimmedMessages,
+      ]);
     const totalTokenCount =
       response.usage?.totalTokens ?? promptTokenCount + completionTokenCount;
 
@@ -2899,6 +3834,31 @@ async function runQuery(
         contentChars: finalText.length,
         contentTokenCount: completionTokenCount,
       }, session.sessionId);
+      const updatedSummary = await maybeUpdateRollingSummary(
+        session,
+        containerInput,
+        toolContext,
+        providerConfig,
+        systemPrompt,
+        roundNumber,
+      );
+      if (updatedSummary) {
+        writeProgress({
+          type: 'context',
+          stage: 'info',
+          round: roundNumber,
+          message: 'rolling_summary_updated',
+          sessionSummaryTokenCount: updatedSummary.summary.tokenCount,
+          contentPreview: truncate(
+            [
+              `removed_messages=${updatedSummary.removedMessageCount}`,
+              `retained_messages=${updatedSummary.retainedMessageCount}`,
+              updatedSummary.summary.content,
+            ].join('\n'),
+            2400,
+          ),
+        }, session.sessionId);
+      }
       saveSession(session);
       writeConversationArchive(session);
       return {
@@ -2950,6 +3910,32 @@ async function runQuery(
         name: toolCall.function.name,
         content: toolResult.modelContent,
       });
+    }
+
+    const updatedSummary = await maybeUpdateRollingSummary(
+      session,
+      containerInput,
+      toolContext,
+      providerConfig,
+      systemPrompt,
+      roundNumber,
+    );
+    if (updatedSummary) {
+      writeProgress({
+        type: 'context',
+        stage: 'info',
+        round: roundNumber,
+        message: 'rolling_summary_updated',
+        sessionSummaryTokenCount: updatedSummary.summary.tokenCount,
+        contentPreview: truncate(
+          [
+            `removed_messages=${updatedSummary.removedMessageCount}`,
+            `retained_messages=${updatedSummary.retainedMessageCount}`,
+            updatedSummary.summary.content,
+          ].join('\n'),
+          2400,
+        ),
+      }, session.sessionId);
     }
 
     const roundSkillConformance = buildSkillConformanceSnapshot(

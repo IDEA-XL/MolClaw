@@ -33,6 +33,96 @@ export interface GroupModelPreference {
   model: string;
 }
 
+export interface MemoryEntryRecord {
+  id: number;
+  externalId: string | null;
+  scope: string;
+  scopeId: string;
+  kind: string;
+  title: string | null;
+  content: string;
+  tags: string[];
+  source: string;
+  confidence: number | null;
+  pinned: boolean;
+  archived: boolean;
+  hitCount: number;
+  lastAccessedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MemoryEntryInput {
+  externalId?: string;
+  scope: string;
+  scopeId: string;
+  kind: string;
+  title?: string;
+  content: string;
+  tags?: string[];
+  source: string;
+  confidence?: number;
+  pinned?: boolean;
+  archived?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface SessionSummaryRecord {
+  id: number;
+  sessionId: string;
+  groupFolder: string;
+  chatJid: string;
+  summaryType: string;
+  content: string;
+  tokenCount: number | null;
+  roundStart: number | null;
+  roundEnd: number | null;
+  createdAt: string;
+}
+
+export interface SessionSummaryInput {
+  sessionId: string;
+  groupFolder: string;
+  chatJid: string;
+  summaryType: string;
+  content: string;
+  tokenCount?: number;
+  roundStart?: number;
+  roundEnd?: number;
+  createdAt?: string;
+}
+
+export interface MemoryHitRecord {
+  id: number;
+  ts: string;
+  chatJid: string;
+  groupFolder: string;
+  sessionId: string | null;
+  round: number | null;
+  memoryEntryId: number | null;
+  injectionLayer: string;
+  reason: string | null;
+  tokenCount: number | null;
+  memoryExternalId: string | null;
+  memoryTitle: string | null;
+  memoryKind: string | null;
+  memoryScope: string | null;
+  memoryScopeId: string | null;
+}
+
+export interface MemoryHitInput {
+  ts?: string;
+  chatJid: string;
+  groupFolder: string;
+  sessionId?: string;
+  round?: number;
+  memoryEntryId?: number;
+  injectionLayer: string;
+  reason?: string;
+  tokenCount?: number;
+}
+
 function createSchema(database: Database.Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS chats (
@@ -116,12 +206,81 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_agent_events_ts ON agent_events(ts);
     CREATE INDEX IF NOT EXISTS idx_agent_events_chat_ts ON agent_events(chat_jid, ts);
+
+    CREATE TABLE IF NOT EXISTS memory_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      external_id TEXT,
+      scope TEXT NOT NULL,
+      scope_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      title TEXT,
+      content TEXT NOT NULL,
+      tags_json TEXT,
+      source TEXT NOT NULL,
+      confidence REAL,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      archived INTEGER NOT NULL DEFAULT 0,
+      hit_count INTEGER NOT NULL DEFAULT 0,
+      last_accessed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_entries_scope
+      ON memory_entries(scope, scope_id, archived, pinned, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_entries_kind
+      ON memory_entries(kind, updated_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_entries_external_id
+      ON memory_entries(external_id)
+      WHERE external_id IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS session_summaries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      summary_type TEXT NOT NULL,
+      content TEXT NOT NULL,
+      token_count INTEGER,
+      round_start INTEGER,
+      round_end INTEGER,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_summaries_session_created
+      ON session_summaries(session_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_session_summaries_chat_created
+      ON session_summaries(chat_jid, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS memory_hits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      session_id TEXT,
+      round INTEGER,
+      memory_entry_id INTEGER,
+      injection_layer TEXT NOT NULL,
+      reason TEXT,
+      token_count INTEGER,
+      FOREIGN KEY (memory_entry_id) REFERENCES memory_entries(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_hits_chat_ts
+      ON memory_hits(chat_jid, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_hits_memory_entry
+      ON memory_hits(memory_entry_id, ts DESC);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN context_mode TEXT DEFAULT 'isolated'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(
+      `ALTER TABLE memory_entries ADD COLUMN external_id TEXT`,
     );
   } catch {
     /* column already exists */
@@ -278,6 +437,517 @@ export function getLatestContextEvent(chatJid: string): AgentEventRecord | undef
   `,
     )
     .get(chatJid) as AgentEventRecord | undefined;
+}
+
+function parseTags(tagsJson: string | null): string[] {
+  if (!tagsJson) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(tagsJson);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .map((value) => value.trim());
+  } catch {
+    return [];
+  }
+}
+
+function mapMemoryEntryRow(row: {
+  id: number;
+  external_id: string | null;
+  scope: string;
+  scope_id: string;
+  kind: string;
+  title: string | null;
+  content: string;
+  tags_json: string | null;
+  source: string;
+  confidence: number | null;
+  pinned: number;
+  archived: number;
+  hit_count: number;
+  last_accessed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}): MemoryEntryRecord {
+  return {
+    id: row.id,
+    externalId: row.external_id,
+    scope: row.scope,
+    scopeId: row.scope_id,
+    kind: row.kind,
+    title: row.title,
+    content: row.content,
+    tags: parseTags(row.tags_json),
+    source: row.source,
+    confidence: row.confidence,
+    pinned: row.pinned === 1,
+    archived: row.archived === 1,
+    hitCount: row.hit_count,
+    lastAccessedAt: row.last_accessed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function createMemoryEntry(input: MemoryEntryInput): number {
+  const createdAt = input.createdAt || new Date().toISOString();
+  const updatedAt = input.updatedAt || createdAt;
+  const result = db
+    .prepare(
+      `
+    INSERT INTO memory_entries (
+      scope,
+      scope_id,
+      external_id,
+      kind,
+      title,
+      content,
+      tags_json,
+      source,
+      confidence,
+      pinned,
+      archived,
+      created_at,
+      updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `,
+    )
+    .run(
+      input.scope,
+      input.scopeId,
+      input.externalId ?? null,
+      input.kind,
+      input.title || null,
+      input.content,
+      input.tags && input.tags.length > 0 ? JSON.stringify(input.tags) : null,
+      input.source,
+      input.confidence ?? null,
+      input.pinned ? 1 : 0,
+      input.archived ? 1 : 0,
+      createdAt,
+      updatedAt,
+    );
+  return Number(result.lastInsertRowid);
+}
+
+export function getMemoryEntry(id: number): MemoryEntryRecord | undefined {
+  const row = db
+    .prepare(
+      `
+    SELECT id, external_id, scope, scope_id, kind, title, content, tags_json, source, confidence, pinned, archived,
+           hit_count, last_accessed_at, created_at, updated_at
+    FROM memory_entries
+    WHERE id = ?
+  `,
+    )
+    .get(id) as
+    | {
+        id: number;
+        external_id: string | null;
+        scope: string;
+        scope_id: string;
+        kind: string;
+        title: string | null;
+        content: string;
+        tags_json: string | null;
+        source: string;
+        confidence: number | null;
+        pinned: number;
+        archived: number;
+        hit_count: number;
+        last_accessed_at: string | null;
+        created_at: string;
+        updated_at: string;
+      }
+    | undefined;
+  return row ? mapMemoryEntryRow(row) : undefined;
+}
+
+export function getMemoryEntryByExternalId(
+  externalId: string,
+): MemoryEntryRecord | undefined {
+  const row = db
+    .prepare(
+      `
+    SELECT id, external_id, scope, scope_id, kind, title, content, tags_json, source, confidence, pinned, archived,
+           hit_count, last_accessed_at, created_at, updated_at
+    FROM memory_entries
+    WHERE external_id = ?
+  `,
+    )
+    .get(externalId) as
+    | {
+        id: number;
+        external_id: string | null;
+        scope: string;
+        scope_id: string;
+        kind: string;
+        title: string | null;
+        content: string;
+        tags_json: string | null;
+        source: string;
+        confidence: number | null;
+        pinned: number;
+        archived: number;
+        hit_count: number;
+        last_accessed_at: string | null;
+        created_at: string;
+        updated_at: string;
+      }
+    | undefined;
+  return row ? mapMemoryEntryRow(row) : undefined;
+}
+
+export function listMemoryEntries(filters?: {
+  externalId?: string;
+  scope?: string;
+  scopeId?: string;
+  includeArchived?: boolean;
+  kind?: string;
+  pinnedOnly?: boolean;
+  limit?: number;
+}): MemoryEntryRecord[] {
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+
+  if (filters?.scope) {
+    conditions.push('scope = ?');
+    values.push(filters.scope);
+  }
+  if (filters?.externalId) {
+    conditions.push('external_id = ?');
+    values.push(filters.externalId);
+  }
+  if (filters?.scopeId) {
+    conditions.push('scope_id = ?');
+    values.push(filters.scopeId);
+  }
+  if (filters?.kind) {
+    conditions.push('kind = ?');
+    values.push(filters.kind);
+  }
+  if (!filters?.includeArchived) {
+    conditions.push('archived = 0');
+  }
+  if (filters?.pinnedOnly) {
+    conditions.push('pinned = 1');
+  }
+
+  const limit = Math.max(1, Math.min(1000, Math.floor(filters?.limit ?? 200)));
+  values.push(limit);
+
+  const whereClause = conditions.length > 0
+    ? `WHERE ${conditions.join(' AND ')}`
+    : '';
+  const rows = db
+    .prepare(
+      `
+    SELECT id, external_id, scope, scope_id, kind, title, content, tags_json, source, confidence, pinned, archived,
+           hit_count, last_accessed_at, created_at, updated_at
+    FROM memory_entries
+    ${whereClause}
+    ORDER BY pinned DESC, updated_at DESC, id DESC
+    LIMIT ?
+  `,
+    )
+    .all(...values) as Array<{
+      id: number;
+      external_id: string | null;
+      scope: string;
+      scope_id: string;
+      kind: string;
+      title: string | null;
+      content: string;
+      tags_json: string | null;
+      source: string;
+      confidence: number | null;
+      pinned: number;
+      archived: number;
+      hit_count: number;
+      last_accessed_at: string | null;
+      created_at: string;
+      updated_at: string;
+    }>;
+  return rows.map(mapMemoryEntryRow);
+}
+
+export function upsertMemoryEntryByExternalId(
+  input: MemoryEntryInput & { externalId: string },
+): number {
+  const existing = getMemoryEntryByExternalId(input.externalId);
+  if (!existing) {
+    return createMemoryEntry(input);
+  }
+
+  const updatedAt = input.updatedAt || new Date().toISOString();
+  db.prepare(
+    `
+    UPDATE memory_entries
+    SET scope = ?,
+        scope_id = ?,
+        kind = ?,
+        title = ?,
+        content = ?,
+        tags_json = ?,
+        source = ?,
+        confidence = ?,
+        pinned = ?,
+        archived = ?,
+        updated_at = ?
+    WHERE external_id = ?
+  `,
+  ).run(
+    input.scope,
+    input.scopeId,
+    input.kind,
+    input.title || null,
+    input.content,
+    input.tags && input.tags.length > 0 ? JSON.stringify(input.tags) : null,
+    input.source,
+    input.confidence ?? null,
+    input.pinned ? 1 : 0,
+    input.archived ? 1 : 0,
+    updatedAt,
+    input.externalId,
+  );
+
+  return existing.id;
+}
+
+export function createSessionSummary(input: SessionSummaryInput): number {
+  const createdAt = input.createdAt || new Date().toISOString();
+  const result = db
+    .prepare(
+      `
+    INSERT INTO session_summaries (
+      session_id,
+      group_folder,
+      chat_jid,
+      summary_type,
+      content,
+      token_count,
+      round_start,
+      round_end,
+      created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `,
+    )
+    .run(
+      input.sessionId,
+      input.groupFolder,
+      input.chatJid,
+      input.summaryType,
+      input.content,
+      input.tokenCount ?? null,
+      input.roundStart ?? null,
+      input.roundEnd ?? null,
+      createdAt,
+    );
+  return Number(result.lastInsertRowid);
+}
+
+export function getSessionSummaries(filters?: {
+  sessionId?: string;
+  chatJid?: string;
+  groupFolder?: string;
+  limit?: number;
+}): SessionSummaryRecord[] {
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+
+  if (filters?.sessionId) {
+    conditions.push('session_id = ?');
+    values.push(filters.sessionId);
+  }
+  if (filters?.chatJid) {
+    conditions.push('chat_jid = ?');
+    values.push(filters.chatJid);
+  }
+  if (filters?.groupFolder) {
+    conditions.push('group_folder = ?');
+    values.push(filters.groupFolder);
+  }
+
+  const limit = Math.max(1, Math.min(1000, Math.floor(filters?.limit ?? 50)));
+  values.push(limit);
+
+  const whereClause = conditions.length > 0
+    ? `WHERE ${conditions.join(' AND ')}`
+    : '';
+  return db
+    .prepare(
+      `
+    SELECT id, session_id, group_folder, chat_jid, summary_type, content,
+           token_count, round_start, round_end, created_at
+    FROM session_summaries
+    ${whereClause}
+    ORDER BY created_at DESC, id DESC
+    LIMIT ?
+  `,
+    )
+    .all(...values)
+    .map((row) => {
+      const summary = row as {
+        id: number;
+        session_id: string;
+        group_folder: string;
+        chat_jid: string;
+        summary_type: string;
+        content: string;
+        token_count: number | null;
+        round_start: number | null;
+        round_end: number | null;
+        created_at: string;
+      };
+      return {
+        id: summary.id,
+        sessionId: summary.session_id,
+        groupFolder: summary.group_folder,
+        chatJid: summary.chat_jid,
+        summaryType: summary.summary_type,
+        content: summary.content,
+        tokenCount: summary.token_count,
+        roundStart: summary.round_start,
+        roundEnd: summary.round_end,
+        createdAt: summary.created_at,
+      };
+    });
+}
+
+export function recordMemoryHit(input: MemoryHitInput): number {
+  const ts = input.ts || new Date().toISOString();
+  const result = db
+    .prepare(
+      `
+    INSERT INTO memory_hits (
+      ts,
+      chat_jid,
+      group_folder,
+      session_id,
+      round,
+      memory_entry_id,
+      injection_layer,
+      reason,
+      token_count
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `,
+    )
+    .run(
+      ts,
+      input.chatJid,
+      input.groupFolder,
+      input.sessionId || null,
+      input.round ?? null,
+      input.memoryEntryId ?? null,
+      input.injectionLayer,
+      input.reason ?? null,
+      input.tokenCount ?? null,
+    );
+
+  if (input.memoryEntryId !== undefined) {
+    db.prepare(
+      `
+      UPDATE memory_entries
+      SET hit_count = hit_count + 1,
+          last_accessed_at = ?
+      WHERE id = ?
+    `,
+    ).run(ts, input.memoryEntryId);
+  }
+
+  return Number(result.lastInsertRowid);
+}
+
+export function getMemoryHits(filters?: {
+  chatJid?: string;
+  sessionId?: string;
+  memoryEntryId?: number;
+  limit?: number;
+}): MemoryHitRecord[] {
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+
+  if (filters?.chatJid) {
+    conditions.push('chat_jid = ?');
+    values.push(filters.chatJid);
+  }
+  if (filters?.sessionId) {
+    conditions.push('session_id = ?');
+    values.push(filters.sessionId);
+  }
+  if (filters?.memoryEntryId !== undefined) {
+    conditions.push('memory_entry_id = ?');
+    values.push(filters.memoryEntryId);
+  }
+
+  const limit = Math.max(1, Math.min(1000, Math.floor(filters?.limit ?? 100)));
+  values.push(limit);
+
+  const whereClause = conditions.length > 0
+    ? `WHERE ${conditions.join(' AND ')}`
+    : '';
+  return db
+    .prepare(
+      `
+    SELECT mh.id, mh.ts, mh.chat_jid, mh.group_folder, mh.session_id, mh.round, mh.memory_entry_id, mh.injection_layer,
+           mh.reason, mh.token_count,
+           me.external_id AS memory_external_id,
+           me.title AS memory_title,
+           me.kind AS memory_kind,
+           me.scope AS memory_scope,
+           me.scope_id AS memory_scope_id
+    FROM memory_hits mh
+    LEFT JOIN memory_entries me ON me.id = mh.memory_entry_id
+    ${whereClause}
+    ORDER BY mh.ts DESC, mh.id DESC
+    LIMIT ?
+  `,
+    )
+    .all(...values)
+    .map((row) => {
+      const hit = row as {
+        id: number;
+        ts: string;
+        chat_jid: string;
+        group_folder: string;
+        session_id: string | null;
+        round: number | null;
+        memory_entry_id: number | null;
+        injection_layer: string;
+        reason: string | null;
+        token_count: number | null;
+        memory_external_id: string | null;
+        memory_title: string | null;
+        memory_kind: string | null;
+        memory_scope: string | null;
+        memory_scope_id: string | null;
+      };
+      return {
+        id: hit.id,
+        ts: hit.ts,
+        chatJid: hit.chat_jid,
+        groupFolder: hit.group_folder,
+        sessionId: hit.session_id,
+        round: hit.round,
+        memoryEntryId: hit.memory_entry_id,
+        injectionLayer: hit.injection_layer,
+        reason: hit.reason,
+        tokenCount: hit.token_count,
+        memoryExternalId: hit.memory_external_id,
+        memoryTitle: hit.memory_title,
+        memoryKind: hit.memory_kind,
+        memoryScope: hit.memory_scope,
+        memoryScopeId: hit.memory_scope_id,
+      };
+    });
 }
 
 /**
