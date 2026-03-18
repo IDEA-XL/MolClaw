@@ -2,13 +2,31 @@
 
 Containerized multi-channel research assistant for bioinformatics workflows.
 
-This fork focuses on practical local deployment with an OpenAI-compatible provider, Discord/WhatsApp channels, and an operational dashboard for tracing agent execution.
+This fork focuses on practical local deployment with:
+
+- an OpenAI-compatible or OpenRouter provider
+- Discord/WhatsApp channels
+- Claude-style runtime skills
+- structured session/durable memory
+- an operational dashboard for tracing agent execution
 
 ## Highlights
 
 - Multi-channel runtime:
   - Discord (DM + guild channels)
   - WhatsApp (optional, QR login)
+- Claude runtime / skills:
+  - Claude-style skill registry inside the container runtime
+  - Skills can be loaded from bundled `container/skills/` and local `.claude/skills/`
+  - Explicit skill invocation support with runtime tracing and conformance checks
+  - Dashboard visibility into skill routing, loaded skills, and parse/runtime status
+- Memory system:
+  - Durable memory tools: `save_memory`, `memory_search`, `memory_get`
+  - File-backed memory store with `MEMORY.md` and `memory/YYYY-MM-DD.md`
+  - SQLite-backed memory index, memory hits, and session summaries
+  - Rolling session summary when transcript approaches token budget
+  - Silent pre-compaction memory flush before older context is compressed away
+  - Closing session summary archived on reset/new session
 - Discord inbound attachments:
   - Images/files are downloaded to per-group workspace (`inbox/discord/<date>/`)
   - Incoming message text includes saved `/workspace/group/...` paths for agent tools
@@ -26,6 +44,8 @@ This fork focuses on practical local deployment with an OpenAI-compatible provid
   - Tree-style workspace file browser (expand/collapse, double-click enter, file preview)
   - Fold-state persistence while new events stream in
   - Context/token usage snapshot
+  - Memory hit aggregation and session summary inspection
+  - Skill routing / conformance visibility
   - Streaming updates via SSE
 - Session controls:
   - Reset session from dashboard
@@ -99,6 +119,14 @@ DASHBOARD_ENABLED=true
 DASHBOARD_HOST=127.0.0.1
 DASHBOARD_PORT=8787
 # DASHBOARD_TOKEN=<optional>
+
+# Optional memory / context tuning
+# BIOCLAW_ROLLING_SUMMARY_TRIGGER_TOKENS=24000
+# BIOCLAW_ROLLING_SUMMARY_TAIL_MESSAGES=10
+# BIOCLAW_DURABLE_MEMORY_PINNED_TOKENS=1000
+# BIOCLAW_DURABLE_MEMORY_RECENT_TOKENS=800
+# BIOCLAW_DURABLE_MEMORY_MATCHED_TOKENS=1400
+# BIOCLAW_SESSION_SUMMARY_TOKENS=2000
 ```
 
 ### 4. Build container image
@@ -143,12 +171,41 @@ Note: your bot invite must include `applications.commands` scope for slash comma
 - Right panel includes:
   - Recent rounds table with jump-to-round buttons
   - Latest model/context/token snapshot
+  - Session summary and memory hit inspection
+  - Skill routing / conformance status
   - Workspace tree browser for the selected group
+
+### Claude Runtime Skills
+
+- Runtime skills are discovered from:
+  - `container/skills/`
+  - `.claude/skills/`
+- Skills are exposed inside the container runtime and can be explicitly invoked by name from the prompt.
+- Dashboard shows:
+  - selected skills
+  - loaded skills
+  - skill parse errors
+  - post-load tool usage / conformance trace
+
+### Memory
+
+- Durable memory is stored per scope as Markdown plus SQLite metadata.
+- Main tools inside the runtime:
+  - `save_memory`
+  - `memory_search`
+  - `memory_get`
+- Non-main groups default to writing memory into their own group scope.
+- As a session grows, BioClaw:
+  - keeps a recent transcript tail
+  - rolls older history into a session summary
+  - tries a silent memory flush before compaction
+- Session resets also archive a closing summary for later review.
 
 ## Documentation
 
 - Demo examples: [docs/DEMO_EXAMPLES.md](docs/DEMO_EXAMPLES.md)
 - Dashboard plan/history: [docs/DASHBOARD_PLAN.md](docs/DASHBOARD_PLAN.md)
+- Memory architecture / roadmap: [docs/MEMORY_V2_PLAN.md](docs/MEMORY_V2_PLAN.md)
 - Docker networking notes: [docs/APPLE-CONTAINER-NETWORKING.md](docs/APPLE-CONTAINER-NETWORKING.md)
 - Security notes: [docs/SECURITY.md](docs/SECURITY.md)
 
@@ -161,14 +218,17 @@ Note: your bot invite must include `applications.commands` scope for slash comma
 │   ├── dashboard/               # dashboard server, helpers, and UI template
 │   ├── container-runner.ts      # Docker lifecycle + stream parsing
 │   ├── group-queue.ts           # per-group execution queue
-│   ├── db.ts                    # SQLite schema + accessors
+│   ├── db.ts                    # SQLite schema + memory/session/event accessors
+│   ├── ipc.ts                   # memory/task/message IPC from containers
+│   ├── session-rollup.ts        # closing session summary utilities
 │   └── index.ts                 # application entrypoint
 ├── container/
 │   ├── Dockerfile               # agent image definition
 │   ├── build.sh                 # image build helper
-│   └── agent-runner/            # in-container agent runtime
-├── docs/                        # docs and troubleshooting
-├── groups/                      # per-group workspaces
+│   ├── skills/                  # bundled Claude-style runtime skills
+│   └── agent-runner/            # in-container agent runtime, tools, memory, skills
+├── docs/                        # docs and architecture notes
+├── groups/                      # per-group workspaces, MEMORY.md, daily memory logs
 ├── data/                        # runtime state (sessions, ipc, auth)
 ├── store/                       # SQLite database
 └── .env.example                 # environment template
