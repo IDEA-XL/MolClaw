@@ -88,6 +88,7 @@ let whatsapp: WhatsAppChannel | null = null;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 let dashboardServer: DashboardServerHandle | null = null;
+const TYPING_HEARTBEAT_MS = 8000;
 
 function recordAgentEvent(event: AgentEventInput): void {
   const eventId = insertAgentEvent(event);
@@ -817,6 +818,25 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let typingHeartbeat: ReturnType<typeof setInterval> | null = null;
+
+  const stopTypingHeartbeat = async () => {
+    if (typingHeartbeat) {
+      clearInterval(typingHeartbeat);
+      typingHeartbeat = null;
+    }
+    await channel.setTyping?.(chatJid, false);
+  };
+
+  const startTypingHeartbeat = async () => {
+    await channel.setTyping?.(chatJid, true);
+    if (!channel.setTyping || typingHeartbeat) {
+      return;
+    }
+    typingHeartbeat = setInterval(() => {
+      void channel.setTyping?.(chatJid, true);
+    }, TYPING_HEARTBEAT_MS);
+  };
 
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
@@ -826,79 +846,94 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
+  await startTypingHeartbeat();
   let hadError = false;
   let outputSentToUser = false;
-
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    if (result.status === 'progress') {
-      recordAgentEvent({
-        ts: result.progress?.timestamp || new Date().toISOString(),
-        chatJid,
-        groupFolder: group.folder,
-        sessionId: result.newSessionId || sessions[group.folder],
-        eventType: result.progress?.type || 'lifecycle',
-        stage: result.progress?.stage || 'info',
-        payload: result.progress
-          ? { ...result.progress }
-          : { message: 'missing progress payload' },
-      });
-      logger.info(
-        {
-          group: group.name,
+  let output: 'success' | 'error';
+  try {
+    output = await runAgent(group, prompt, chatJid, async (result) => {
+      if (result.status === 'progress') {
+        recordAgentEvent({
+          ts: result.progress?.timestamp || new Date().toISOString(),
           chatJid,
-          progress: result.progress,
-        },
-        `Agent progress: ${summarizeProgress(result.progress)}`,
-      );
-      return;
-    }
-
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
-      recordAgentEvent({
-        ts: new Date().toISOString(),
-        chatJid,
-        groupFolder: group.folder,
-        sessionId: result.newSessionId || sessions[group.folder],
-        eventType: 'final_output',
-        stage: 'info',
-        payload: {
-          length: raw.length,
-          tokenCountEstimate: Math.max(1, Math.ceil(raw.length / 4)),
-          text: raw.slice(0, 12000),
-          preview: raw.slice(0, 300),
-        },
-      });
-      const text = formatOutbound(channel, raw);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+          groupFolder: group.folder,
+          sessionId: result.newSessionId || sessions[group.folder],
+          eventType: result.progress?.type || 'lifecycle',
+          stage: result.progress?.stage || 'info',
+          payload: result.progress
+            ? { ...result.progress }
+            : { message: 'missing progress payload' },
+        });
+        logger.info(
+          {
+            group: group.name,
+            chatJid,
+            progress: result.progress,
+          },
+          `Agent progress: ${summarizeProgress(result.progress)}`,
+        );
+        if (result.progress?.message === 'waiting_for_follow_up_message') {
+          await stopTypingHeartbeat();
+        } else if (
+          result.progress?.message === 'received_follow_up_message'
+          || result.progress?.message === 'query_started'
+        ) {
+          await startTypingHeartbeat();
+        } else if (result.progress?.stage === 'error') {
+          await stopTypingHeartbeat();
+        }
+        return;
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'error') {
-      recordAgentEvent({
-        ts: new Date().toISOString(),
-        chatJid,
-        groupFolder: group.folder,
-        sessionId: result.newSessionId || sessions[group.folder],
-        eventType: 'error',
-        stage: 'error',
-        payload: {
-          error: result.error || 'Unknown error',
-        },
-      });
-      hadError = true;
-    }
-  });
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
+        logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
+        recordAgentEvent({
+          ts: new Date().toISOString(),
+          chatJid,
+          groupFolder: group.folder,
+          sessionId: result.newSessionId || sessions[group.folder],
+          eventType: 'final_output',
+          stage: 'info',
+          payload: {
+            length: raw.length,
+            tokenCountEstimate: Math.max(1, Math.ceil(raw.length / 4)),
+            text: raw.slice(0, 12000),
+            preview: raw.slice(0, 300),
+          },
+        });
+        const text = formatOutbound(channel, raw);
+        if (text) {
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+        }
+        await stopTypingHeartbeat();
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
+      }
 
-  await channel.setTyping?.(chatJid, false);
-  if (idleTimer) clearTimeout(idleTimer);
+      if (result.status === 'error') {
+        recordAgentEvent({
+          ts: new Date().toISOString(),
+          chatJid,
+          groupFolder: group.folder,
+          sessionId: result.newSessionId || sessions[group.folder],
+          eventType: 'error',
+          stage: 'error',
+          payload: {
+            error: result.error || 'Unknown error',
+          },
+        });
+        hadError = true;
+        await stopTypingHeartbeat();
+      }
+    });
+  } finally {
+    if (typingHeartbeat) clearInterval(typingHeartbeat);
+    if (idleTimer) clearTimeout(idleTimer);
+    await channel.setTyping?.(chatJid, false);
+  }
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —

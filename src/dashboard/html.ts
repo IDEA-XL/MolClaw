@@ -1688,9 +1688,44 @@ export function getDashboardHtml(): string {
       const events = getFilteredEvents();
       for (let i = events.length - 1; i >= 0; i -= 1) {
         const e = events[i];
+        const p = getEventPayload(e);
+        if (
+          e.eventType === 'context'
+          && (
+            p.historyTokenCount != null
+            || p.trimmedTokenCount != null
+            || p.historyMessageCount != null
+            || p.trimmedMessageCount != null
+          )
+        ) {
+          return e;
+        }
+      }
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const e = events[i];
         if (e.eventType === 'context' && e.payload) return e;
       }
       return null;
+    }
+
+    function hasRoundMetricsContextPayload(payload) {
+      return !!payload && (
+        payload.historyTokenCount != null
+        || payload.trimmedTokenCount != null
+        || payload.historyMessageCount != null
+        || payload.trimmedMessageCount != null
+      );
+    }
+
+    function mergeRoundContextPayload(basePayload, nextPayload) {
+      const merged = Object.assign({}, basePayload || {});
+      const next = nextPayload || {};
+      for (const key of Object.keys(next)) {
+        if (next[key] != null) {
+          merged[key] = next[key];
+        }
+      }
+      return merged;
     }
 
     function getLatestSkillTraceEvent() {
@@ -1789,7 +1824,13 @@ export function getDashboardHtml(): string {
         };
         if (e.ts < existing.ts) existing.ts = e.ts;
         if (e.eventType === 'context') {
-          existing.context = p;
+          if (!existing.context) {
+            existing.context = p;
+          } else if (hasRoundMetricsContextPayload(p) || !hasRoundMetricsContextPayload(existing.context)) {
+            existing.context = mergeRoundContextPayload(existing.context, p);
+          } else {
+            existing.context = mergeRoundContextPayload(existing.context, p);
+          }
         } else if (e.eventType === 'provider' && e.stage === 'end') {
           existing.provider = p;
         }
