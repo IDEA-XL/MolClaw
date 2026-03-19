@@ -1,20 +1,40 @@
+
+
 # MolClaw
 
-Containerized multi-channel research assistant for bioinformatics workflows.
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/IDEA-XL/MolClaw)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/IDEA-XL/MolClaw/blob/main/LICENSE)
 
-This fork focuses on practical local deployment with:
 
-- an OpenAI-compatible or OpenRouter provider
-- Discord/WhatsApp channels
+MolClaw is a practical fork of [BioClaw](https://github.com/Runchuan-BU/BioClaw): a containerized, multi-channel research assistant for bioinformatics workflows.
+
+This fork keeps the original BioClaw direction intact while focusing on runtime and productization improvements for day-to-day deployment:
+
+- OpenAI-compatible and OpenRouter providers
+- Discord and WhatsApp channels
 - Claude-style runtime skills
-- structured session/durable memory
-- an operational dashboard for tracing agent execution
+- session and durable memory
+- dashboard observability for agent execution
 
 ## Highlights
 
+- What MolClaw adds beyond the upstream baseline:
+  - OpenAI-compatible and OpenRouter provider support
+  - per-chat provider and model selection via Discord `/models`
+  - a real-time dashboard for provider/tool/output tracing
+  - round-level execution views, session filtering, and file browsing
+  - Claude-style runtime skill loading, routing, and conformance tracing
+  - durable memory, memory search/get tools, and rolling session summaries
+  - Discord attachment ingestion with multimodal capability fallback
+  - cleaner Docker image publishing to GHCR
 - Multi-channel runtime:
   - Discord (DM + guild channels)
   - WhatsApp (optional, QR login)
+- Provider controls:
+  - OpenAI-compatible endpoint support
+  - OpenRouter support
+  - per-group / per-chat provider-model selection
+  - Discord `/models` management flow
 - Claude runtime / skills:
   - Claude-style skill registry inside the container runtime
   - Skills can be loaded from bundled `container/skills/` and local `.claude/skills/`
@@ -55,6 +75,7 @@ This fork focuses on practical local deployment with:
   - Discord image file send support (`sendImage`)
 - Robust operations:
   - Startup logs include dashboard URL
+  - Discord typing heartbeat during long-running jobs
   - Cleaner shutdown for dashboard/stream resources
 
 ## Quick Start
@@ -72,6 +93,8 @@ git clone https://github.com/IDEA-XL/BioClaw-openai.git
 cd BioClaw-openai
 npm install
 ```
+
+If you rename or mirror this fork under a different repository name, replace the clone URL accordingly.
 
 ### 3. Configure
 
@@ -140,7 +163,7 @@ DASHBOARD_PORT=8787
 This repo includes a GitHub Actions workflow that publishes the container to GHCR:
 
 - Workflow: `Publish MolClaw Image`
-- Registry: `ghcr.io/<github-owner>/molclaw-agent`
+- Registry: `ghcr.io/idea-xl/molclaw-agent`
 - Trigger:
   - push to `main` updates `:latest`
   - push tag like `v0.1.0` publishes `:v0.1.0`
@@ -160,16 +183,18 @@ git push origin v0.1.0
 Pull example:
 
 ```bash
-docker pull ghcr.io/<github-owner>/molclaw-agent:latest
+docker pull ghcr.io/idea-xl/molclaw-agent:latest
 ```
 
 If you prefer to publish manually from your machine:
 
 ```bash
-docker tag molclaw-agent:latest ghcr.io/<github-owner>/molclaw-agent:latest
+docker tag molclaw-agent:latest ghcr.io/idea-xl/molclaw-agent:latest
 echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-username> --password-stdin
-docker push ghcr.io/<github-owner>/molclaw-agent:latest
+docker push ghcr.io/idea-xl/molclaw-agent:latest
 ```
+
+If you want others to pull the image without authentication, make sure the GitHub package visibility for `molclaw-agent` is set to `public`.
 
 ### 6. Start
 
@@ -188,6 +213,7 @@ Dashboard: http://127.0.0.1:8787/
 ### Discord
 
 - DM the bot directly, or mention it in a guild channel.
+- Guild channels auto-register on first message.
 - Start a new session with:
   - `/newsession`
   - `/reset_session`
@@ -211,7 +237,14 @@ Note: your bot invite must include `applications.commands` scope for slash comma
   - Skill routing / conformance status
   - Workspace tree browser for the selected group
 
-### Claude Runtime Skills
+### Attachments and multimodal input
+
+- Discord image/file attachments are downloaded into the group workspace.
+- Saved file paths are injected into the incoming message so the agent can operate on them directly.
+- If the selected provider/model supports image input, Discord images are forwarded as multimodal content.
+- If the model is text-only, MolClaw falls back gracefully and emits a user-visible notice instead of silently failing.
+
+### Claude-style Runtime Skills
 
 - Runtime skills are discovered from:
   - `container/skills/`
@@ -270,14 +303,28 @@ Note: your bot invite must include `applications.commands` scope for slash comma
 └── .env.example                 # environment template
 ```
 
+## Lineage
+
+MolClaw is part of a shared lineage rather than a disconnected rewrite:
+
+- [BioClaw](https://github.com/Runchuan-BU/BioClaw) established the bioinformatics-oriented assistant experience on top of NanoClaw and STELLA-inspired tooling.
+- [NanoClaw](https://github.com/qwibitai/nanoclaw) provided the containerized orchestrator pattern and much of the operational architecture.
+- [STELLA](https://github.com/zaixizhang/STELLA) informed the biomedical tool and workflow direction used by BioClaw and downstream forks.
+
+We have had constructive exchanges with the BioClaw group and want to keep that relationship explicit in this repository. If you are evaluating or building on MolClaw, we strongly encourage you to also read and reference the upstream BioClaw project. The two codebases are best understood as complementary work on a shared problem.
+
 ## Acknowledgements
 
-This project builds on ideas and components from:
+MolClaw should be read in the context of the projects it builds on:
 
-- NanoClaw: https://github.com/qwibitai/nanoclaw
-- STELLA: https://github.com/zaixizhang/STELLA
-- MolClaw: https://github.com/Runchuan-BU/MolClaw
+- [BioClaw](https://github.com/Runchuan-BU/BioClaw): the direct upstream fork base and the closest conceptual ancestor of this repository.
+- [NanoClaw](https://github.com/qwibitai/nanoclaw): the underlying containerized orchestrator pattern and operational architecture.
+- [STELLA](https://github.com/zaixizhang/STELLA): a major influence on the biomedical workflow and tool direction used by BioClaw and related work.
+
+If this repository is useful to you, please also star, cite, and read the upstream projects. We view MolClaw and BioClaw as part of a shared open effort rather than competing silos.
 
 ## License
 
-[MIT](LICENSE)
+MolClaw is distributed under the [MIT License](LICENSE).
+
+The current codebase includes MolClaw work plus portions derived from BioClaw and, transitively, NanoClaw. Please keep those attribution notices intact in downstream copies and forks.
