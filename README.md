@@ -168,41 +168,39 @@ DASHBOARD_PORT=8787
 
 ### 5. Publish remote image
 
-This repo includes a GitHub Actions workflow that publishes the container to GHCR:
+The recommended public image is on Docker Hub:
+
+```bash
+docker pull hcaoaf/molclaw-agent:latest
+```
+
+To publish a new Docker Hub image manually from your machine:
+
+```bash
+docker tag molclaw-agent:latest hcaoaf/molclaw-agent:latest
+docker push hcaoaf/molclaw-agent:latest
+```
+
+Versioned release example:
+
+```bash
+docker tag molclaw-agent:latest hcaoaf/molclaw-agent:v0.1.0
+docker push hcaoaf/molclaw-agent:v0.1.0
+```
+
+This repo also includes an optional GitHub Actions workflow for GHCR publishing:
 
 - Workflow: `Publish MolClaw Image`
 - Registry: `ghcr.io/idea-xl/molclaw-agent`
 - Trigger:
-  - push to `main` updates `:latest`
-  - push tag like `v0.1.0` publishes `:v0.1.0`
-  - `workflow_dispatch` can publish manually
+  - push tag like `v0.1.0`
+  - `workflow_dispatch`
 
-To use it:
-
-1. Push this repo to GitHub.
-2. Open `Actions` and allow workflows if GitHub asks.
-3. Push to `main`, or create a release tag:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-Pull example:
+GHCR pull example:
 
 ```bash
 docker pull ghcr.io/idea-xl/molclaw-agent:latest
 ```
-
-If you prefer to publish manually from your machine:
-
-```bash
-docker tag molclaw-agent:latest ghcr.io/idea-xl/molclaw-agent:latest
-echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-username> --password-stdin
-docker push ghcr.io/idea-xl/molclaw-agent:latest
-```
-
-If you want others to pull the image without authentication, make sure the GitHub package visibility for `molclaw-agent` is set to `public`.
 
 ### 6. Start
 
