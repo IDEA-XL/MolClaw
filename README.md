@@ -306,6 +306,15 @@ Note: your bot invite must include `applications.commands` scope for slash comma
 └── .env.example                 # environment template
 ```
 
+## Progress
+
+- [x] Memory improvements: durable memory tools, rolling session summary, session summary archival, and dashboard-visible memory hits.
+- [x] Dashboard compatibility and observability: grouped round timeline, session filtering, file browser, token/context snapshots, and SSE updates.
+- [x] Claude-style runtime support: runtime skill discovery, loading, routing, tracing, and conformance checks inside the container runner.
+- [ ] Subagent support.
+- [ ] Heartbeat support.
+- [ ] Long-running background job submission, monitoring, and user feedback loop.
+
 ## Lineage
 
 MolClaw is part of a shared lineage rather than a disconnected rewrite:
