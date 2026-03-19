@@ -1,5 +1,5 @@
 <div align="center">
-<img src="molclaw.png" width="200">
+<img src="assets/molclaw.png" width="500">
 </div>
 
 # MolClaw
@@ -227,6 +227,8 @@ Dashboard: http://127.0.0.1:8787/
 Note: your bot invite must include `applications.commands` scope for slash commands.
 
 ### Dashboard
+
+<img src="assets/dashboard.png" width="1000">
 
 - Open the printed URL from startup logs.
 - Use `New Session` button to reset the current chat session.
