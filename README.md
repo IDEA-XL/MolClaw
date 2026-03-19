@@ -18,6 +18,12 @@ This fork keeps the original BioClaw direction intact while focusing on runtime 
 - session and durable memory
 - dashboard observability for agent execution
 
+<p align="center">
+  <a href="https://youtu.be/b37-nE9euuo">
+    <img src="https://img.youtube.com/vi/b37-nE9euuo/maxresdefault.jpg" alt="MolClaw Demo" width="600">
+  </a>
+</p>
+
 ## Highlights
 
 - What MolClaw adds beyond the upstream baseline:
