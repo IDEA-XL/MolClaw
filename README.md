@@ -1,4 +1,6 @@
-
+<div align="center">
+<img src="molclaw.png" width="200">
+</div>
 
 # MolClaw
 
