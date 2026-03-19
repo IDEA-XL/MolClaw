@@ -276,7 +276,6 @@ Note: your bot invite must include `applications.commands` scope for slash comma
 
 ## Documentation
 
-- Demo examples: [docs/DEMO_EXAMPLES.md](docs/DEMO_EXAMPLES.md)
 - Dashboard plan/history: [docs/DASHBOARD_PLAN.md](docs/DASHBOARD_PLAN.md)
 - Memory architecture / roadmap: [docs/MEMORY_V2_PLAN.md](docs/MEMORY_V2_PLAN.md)
 - Docker networking notes: [docs/APPLE-CONTAINER-NETWORKING.md](docs/APPLE-CONTAINER-NETWORKING.md)
