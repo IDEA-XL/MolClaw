@@ -15,7 +15,7 @@ import {
 const tempDirs: string[] = [];
 
 function createTempDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bioclaw-memory-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'molclaw-memory-'));
   tempDirs.push(dir);
   return dir;
 }

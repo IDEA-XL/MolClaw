@@ -1,4 +1,4 @@
-# BioClaw
+# MolClaw
 
 Containerized multi-channel research assistant for bioinformatics workflows.
 
@@ -121,12 +121,12 @@ DASHBOARD_PORT=8787
 # DASHBOARD_TOKEN=<optional>
 
 # Optional memory / context tuning
-# BIOCLAW_ROLLING_SUMMARY_TRIGGER_TOKENS=24000
-# BIOCLAW_ROLLING_SUMMARY_TAIL_MESSAGES=10
-# BIOCLAW_DURABLE_MEMORY_PINNED_TOKENS=1000
-# BIOCLAW_DURABLE_MEMORY_RECENT_TOKENS=800
-# BIOCLAW_DURABLE_MEMORY_MATCHED_TOKENS=1400
-# BIOCLAW_SESSION_SUMMARY_TOKENS=2000
+# MOLCLAW_ROLLING_SUMMARY_TRIGGER_TOKENS=24000
+# MOLCLAW_ROLLING_SUMMARY_TAIL_MESSAGES=10
+# MOLCLAW_DURABLE_MEMORY_PINNED_TOKENS=1000
+# MOLCLAW_DURABLE_MEMORY_RECENT_TOKENS=800
+# MOLCLAW_DURABLE_MEMORY_MATCHED_TOKENS=1400
+# MOLCLAW_SESSION_SUMMARY_TOKENS=2000
 ```
 
 ### 4. Build container image
@@ -135,7 +135,43 @@ DASHBOARD_PORT=8787
 ./container/build.sh latest
 ```
 
-### 5. Start
+### 5. Publish remote image
+
+This repo includes a GitHub Actions workflow that publishes the container to GHCR:
+
+- Workflow: `Publish MolClaw Image`
+- Registry: `ghcr.io/<github-owner>/molclaw-agent`
+- Trigger:
+  - push to `main` updates `:latest`
+  - push tag like `v0.1.0` publishes `:v0.1.0`
+  - `workflow_dispatch` can publish manually
+
+To use it:
+
+1. Push this repo to GitHub.
+2. Open `Actions` and allow workflows if GitHub asks.
+3. Push to `main`, or create a release tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Pull example:
+
+```bash
+docker pull ghcr.io/<github-owner>/molclaw-agent:latest
+```
+
+If you prefer to publish manually from your machine:
+
+```bash
+docker tag molclaw-agent:latest ghcr.io/<github-owner>/molclaw-agent:latest
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-username> --password-stdin
+docker push ghcr.io/<github-owner>/molclaw-agent:latest
+```
+
+### 6. Start
 
 ```bash
 npm run build && npm start
@@ -195,7 +231,7 @@ Note: your bot invite must include `applications.commands` scope for slash comma
   - `memory_search`
   - `memory_get`
 - Non-main groups default to writing memory into their own group scope.
-- As a session grows, BioClaw:
+- As a session grows, MolClaw:
   - keeps a recent transcript tail
   - rolls older history into a session summary
   - tries a silent memory flush before compaction
@@ -240,7 +276,7 @@ This project builds on ideas and components from:
 
 - NanoClaw: https://github.com/qwibitai/nanoclaw
 - STELLA: https://github.com/zaixizhang/STELLA
-- BioClaw: https://github.com/Runchuan-BU/BioClaw
+- MolClaw: https://github.com/Runchuan-BU/MolClaw
 
 ## License
 

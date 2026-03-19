@@ -1,4 +1,4 @@
-# BioClaw
+# MolClaw
 
 AI-powered biology research assistant. Inspired by [NanoClaw](https://github.com/qwibitai/nanoclaw). See [README.md](README.md) for setup.
 
@@ -68,8 +68,8 @@ npm run build        # Compile TypeScript
 
 Service management:
 ```bash
-launchctl load ~/Library/LaunchAgents/com.bioclaw.plist
-launchctl unload ~/Library/LaunchAgents/com.bioclaw.plist
+launchctl load ~/Library/LaunchAgents/com.molclaw.plist
+launchctl unload ~/Library/LaunchAgents/com.molclaw.plist
 ```
 
 ## Container Build Cache
@@ -81,4 +81,4 @@ container builder stop && container builder rm && container builder start
 ./container/build.sh
 ```
 
-Always verify after rebuild: `container run -i --rm --entrypoint wc bioclaw-agent:latest -l /app/src/index.ts`
+Always verify after rebuild: `container run -i --rm --entrypoint wc molclaw-agent:latest -l /app/src/index.ts`

@@ -47,7 +47,7 @@ import pysam                                # BAM/SAM from Python
 
 Your output is sent to the user or group.
 
-You also have `mcp__bioclaw__send_message` which sends a message immediately while you're still working. This is useful when you want to acknowledge a request before starting longer analysis (e.g., "Starting BLAST search, this may take a few minutes...").
+You also have `mcp__molclaw__send_message` which sends a message immediately while you're still working. This is useful when you want to acknowledge a request before starting longer analysis (e.g., "Starting BLAST search, this may take a few minutes...").
 
 ### Internal thoughts
 

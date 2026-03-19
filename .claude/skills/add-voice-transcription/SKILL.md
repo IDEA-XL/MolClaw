@@ -1,6 +1,6 @@
 ---
 name: add-voice-transcription
-description: Add voice message transcription to BioClaw using OpenAI's Whisper API. Automatically transcribes WhatsApp voice notes so the agent can read and respond to them.
+description: Add voice message transcription to MolClaw using OpenAI's Whisper API. Automatically transcribes WhatsApp voice notes so the agent can read and respond to them.
 ---
 
 # Add Voice Message Transcription
@@ -40,7 +40,7 @@ Read `package.json` and add the `openai` package to dependencies:
 }
 ```
 
-Then install it. **IMPORTANT:** The OpenAI SDK requires Zod v3 as an optional peer dependency, but BioClaw uses Zod v4. This conflict is guaranteed, so always use `--legacy-peer-deps`:
+Then install it. **IMPORTANT:** The OpenAI SDK requires Zod v3 as an optional peer dependency, but MolClaw uses Zod v4. This conflict is guaranteed, so always use `--legacy-peer-deps`:
 
 ```bash
 npm install --legacy-peer-deps
@@ -298,31 +298,31 @@ if (registeredGroups[chatJid]) {
 
 ### Step 6: Fix Orphan Container Cleanup (CRITICAL)
 
-**This step is essential.** When the BioClaw service restarts (e.g., `launchctl kickstart -k`), the running container is detached but NOT killed. The new service instance spawns a fresh container, but the orphan keeps running and shares the same IPC mount directory. Both containers race to read IPC input files, causing the new container to randomly miss messages — making it appear like the agent doesn't respond.
+**This step is essential.** When the MolClaw service restarts (e.g., `launchctl kickstart -k`), the running container is detached but NOT killed. The new service instance spawns a fresh container, but the orphan keeps running and shares the same IPC mount directory. Both containers race to read IPC input files, causing the new container to randomly miss messages — making it appear like the agent doesn't respond.
 
 The existing cleanup code in `ensureContainerSystemRunning()` in `src/index.ts` uses `container ls --format {{.Names}}` which **silently fails** on Apple Container (only `json` and `table` are valid format options). The catch block swallows the error, so orphans are never cleaned up.
 
-Find the orphan cleanup block in `ensureContainerSystemRunning()` (the section starting with `// Kill and clean up orphaned BioClaw containers from previous runs`) and replace it with:
+Find the orphan cleanup block in `ensureContainerSystemRunning()` (the section starting with `// Kill and clean up orphaned MolClaw containers from previous runs`) and replace it with:
 
 ```typescript
-  // Kill and clean up orphaned BioClaw containers from previous runs
+  // Kill and clean up orphaned MolClaw containers from previous runs
   try {
     const listJson = execSync('container ls -a --format json', {
       stdio: ['pipe', 'pipe', 'pipe'],
       encoding: 'utf-8',
     });
     const containers = JSON.parse(listJson) as Array<{ configuration: { id: string }; status: string }>;
-    const bioclawContainers = containers.filter(
-      (c) => c.configuration.id.startsWith('bioclaw-'),
+    const molclawContainers = containers.filter(
+      (c) => c.configuration.id.startsWith('molclaw-'),
     );
-    const running = bioclawContainers
+    const running = molclawContainers
       .filter((c) => c.status === 'running')
       .map((c) => c.configuration.id);
     if (running.length > 0) {
       execSync(`container stop ${running.join(' ')}`, { stdio: 'pipe' });
       logger.info({ count: running.length }, 'Stopped orphaned containers');
     }
-    const allNames = bioclawContainers.map((c) => c.configuration.id);
+    const allNames = molclawContainers.map((c) => c.configuration.id);
     if (allNames.length > 0) {
       execSync(`container rm ${allNames.join(' ')}`, { stdio: 'pipe' });
       logger.info({ count: allNames.length }, 'Cleaned up stopped containers');
@@ -344,13 +344,13 @@ Before restarting the service, kill any orphaned containers manually to ensure a
 container ls -a --format json | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-nc = [c['configuration']['id'] for c in data if c['configuration']['id'].startswith('bioclaw-')]
+nc = [c['configuration']['id'] for c in data if c['configuration']['id'].startswith('molclaw-')]
 if nc: print(' '.join(nc))
 " | xargs -r container stop 2>/dev/null
 container ls -a --format json | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-nc = [c['configuration']['id'] for c in data if c['configuration']['id'].startswith('bioclaw-')]
+nc = [c['configuration']['id'] for c in data if c['configuration']['id'].startswith('molclaw-')]
 if nc: print(' '.join(nc))
 " | xargs -r container rm 2>/dev/null
 echo "Orphaned containers cleaned"
@@ -359,18 +359,18 @@ echo "Orphaned containers cleaned"
 Now restart the service:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.bioclaw
+launchctl kickstart -k gui/$(id -u)/com.molclaw
 ```
 
-Verify it started with exactly one (or zero, before first message) bioclaw container:
+Verify it started with exactly one (or zero, before first message) molclaw container:
 
 ```bash
-sleep 3 && launchctl list | grep bioclaw
+sleep 3 && launchctl list | grep molclaw
 container ls -a --format json | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-nc = [c for c in data if c['configuration']['id'].startswith('bioclaw-')]
-print(f'{len(nc)} bioclaw container(s)')
+nc = [c for c in data if c['configuration']['id'].startswith('molclaw-')]
+print(f'{len(nc)} molclaw container(s)')
 for c in nc: print(f'  {c[\"configuration\"][\"id\"]} - {c[\"status\"]}')
 "
 ```
@@ -392,7 +392,7 @@ Tell the user:
 Watch for transcription in the logs:
 
 ```bash
-tail -f logs/bioclaw.log | grep -i "voice\|transcri"
+tail -f logs/molclaw.log | grep -i "voice\|transcri"
 ```
 
 ---
@@ -439,8 +439,8 @@ The architecture supports multiple providers. To add Groq, Deepgram, or local Wh
 container ls -a --format json | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-nc = [c for c in data if c['configuration']['id'].startswith('bioclaw-')]
-print(f'{len(nc)} bioclaw container(s):')
+nc = [c for c in data if c['configuration']['id'].startswith('molclaw-')]
+print(f'{len(nc)} molclaw container(s):')
 for c in nc: print(f'  {c[\"configuration\"][\"id\"]} - {c[\"status\"]}')
 "
 ```
@@ -448,20 +448,20 @@ for c in nc: print(f'  {c[\"configuration\"][\"id\"]} - {c[\"status\"]}')
 If you see more than one running container, kill the orphans:
 
 ```bash
-# Stop all bioclaw containers, then restart the service
+# Stop all molclaw containers, then restart the service
 container ls -a --format json | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-running = [c['configuration']['id'] for c in data if c['configuration']['id'].startswith('bioclaw-') and c['status'] == 'running']
+running = [c['configuration']['id'] for c in data if c['configuration']['id'].startswith('molclaw-') and c['status'] == 'running']
 if running: print(' '.join(running))
 " | xargs -r container stop 2>/dev/null
 container ls -a --format json | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-nc = [c['configuration']['id'] for c in data if c['configuration']['id'].startswith('bioclaw-')]
+nc = [c['configuration']['id'] for c in data if c['configuration']['id'].startswith('molclaw-')]
 if nc: print(' '.join(nc))
 " | xargs -r container rm 2>/dev/null
-launchctl kickstart -k gui/$(id -u)/com.bioclaw
+launchctl kickstart -k gui/$(id -u)/com.molclaw
 ```
 
 **Root cause:** The `ensureContainerSystemRunning()` function previously used `container ls --format {{.Names}}` which silently fails on Apple Container (only `json` and `table` formats are supported). Step 6 of this skill fixes this. If you haven't applied Step 6, the orphan problem will recur on every restart.
@@ -470,7 +470,7 @@ launchctl kickstart -k gui/$(id -u)/com.bioclaw
 
 Check logs for specific errors:
 ```bash
-tail -100 logs/bioclaw.log | grep -i transcription
+tail -100 logs/molclaw.log | grep -i transcription
 ```
 
 Common causes:
@@ -494,7 +494,7 @@ const __dirname = dirname(__filename);
 
 ### Dependency conflicts (Zod versions)
 
-The OpenAI SDK requires Zod v3, but BioClaw uses Zod v4. This conflict is guaranteed — always use:
+The OpenAI SDK requires Zod v3, but MolClaw uses Zod v4. This conflict is guaranteed — always use:
 ```bash
 npm install --legacy-peer-deps
 ```
@@ -545,7 +545,7 @@ To remove the feature:
 6. Rebuild:
    ```bash
    npm run build
-   launchctl kickstart -k gui/$(id -u)/com.bioclaw
+   launchctl kickstart -k gui/$(id -u)/com.molclaw
    ```
 
 ---

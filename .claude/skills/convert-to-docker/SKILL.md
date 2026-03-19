@@ -1,12 +1,12 @@
 ---
 name: convert-to-docker
-description: Convert BioClaw from Apple Container to Docker for cross-platform support. Use when user wants to run on Linux, switch to Docker, enable cross-platform deployment, or migrate away from Apple Container. Triggers on "docker", "linux support", "convert to docker", "cross-platform", or "replace apple container".
+description: Convert MolClaw from Apple Container to Docker for cross-platform support. Use when user wants to run on Linux, switch to Docker, enable cross-platform deployment, or migrate away from Apple Container. Triggers on "docker", "linux support", "convert to docker", "cross-platform", or "replace apple container".
 disable-model-invocation: true
 ---
 
 # Convert to Docker
 
-This skill migrates BioClaw from Apple Container (macOS-only) to Docker for cross-platform support (macOS and Linux).
+This skill migrates MolClaw from Apple Container (macOS-only) to Docker for cross-platform support (macOS and Linux).
 
 **What this changes:**
 - Container runtime: Apple Container → Docker
@@ -201,7 +201,7 @@ Docker provides cross-platform support (macOS and Linux), a large ecosystem, and
 ```markdown
 **Can I run this on Linux?**
 
-Yes. BioClaw uses Docker, which works on both macOS and Linux. Just install Docker and run `/setup`.
+Yes. MolClaw uses Docker, which works on both macOS and Linux. Just install Docker and run `/setup`.
 ```
 
 ## 5. Update Skills
@@ -248,8 +248,8 @@ Update build verification:
 Verify the build succeeded:
 
 \`\`\`bash
-docker images | grep bioclaw-agent
-echo '{}' | docker run -i --entrypoint /bin/echo bioclaw-agent:latest "Container OK" || echo "Container build failed"
+docker images | grep molclaw-agent
+echo '{}' | docker run -i --entrypoint /bin/echo molclaw-agent:latest "Container OK" || echo "Container build failed"
 \`\`\`
 ```
 
@@ -284,7 +284,7 @@ npm run build
 ./container/build.sh
 
 # Verify image exists
-docker images | grep bioclaw-agent
+docker images | grep molclaw-agent
 ```
 
 ## 7. Test the Migration
@@ -292,14 +292,14 @@ docker images | grep bioclaw-agent
 ### 7a. Test basic container execution
 
 ```bash
-echo '{}' | docker run -i --entrypoint /bin/echo bioclaw-agent:latest "Container OK"
+echo '{}' | docker run -i --entrypoint /bin/echo molclaw-agent:latest "Container OK"
 ```
 
 ### 7b. Test readonly mounts
 
 ```bash
 mkdir -p /tmp/test-ro && echo "test" > /tmp/test-ro/file.txt
-docker run --rm --entrypoint /bin/bash -v /tmp/test-ro:/test:ro bioclaw-agent:latest \
+docker run --rm --entrypoint /bin/bash -v /tmp/test-ro:/test:ro molclaw-agent:latest \
   -c "cat /test/file.txt && touch /test/new.txt 2>&1 || echo 'Write blocked (expected)'"
 rm -rf /tmp/test-ro
 ```
@@ -310,7 +310,7 @@ Expected: Read succeeds, write fails with "Read-only file system".
 
 ```bash
 mkdir -p /tmp/test-rw
-docker run --rm --entrypoint /bin/bash -v /tmp/test-rw:/test bioclaw-agent:latest \
+docker run --rm --entrypoint /bin/bash -v /tmp/test-rw:/test molclaw-agent:latest \
   -c "echo 'test write' > /test/new.txt && cat /test/new.txt"
 cat /tmp/test-rw/new.txt && rm -rf /tmp/test-rw
 ```

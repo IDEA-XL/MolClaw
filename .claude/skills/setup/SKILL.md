@@ -1,9 +1,9 @@
 ---
 name: setup
-description: Run initial BioClaw setup. Use when user wants to install dependencies, authenticate WhatsApp, register their main channel, or start the background services. Triggers on "setup", "install", "configure bioclaw", or first-time setup requests.
+description: Run initial MolClaw setup. Use when user wants to install dependencies, authenticate WhatsApp, register their main channel, or start the background services. Triggers on "setup", "install", "configure molclaw", or first-time setup requests.
 ---
 
-# BioClaw Setup
+# MolClaw Setup
 
 Run all commands automatically. Only pause when user action is required (WhatsApp authentication, configuration choices).
 
@@ -39,7 +39,7 @@ Tell the user:
 **If Apple Container is already installed:** Continue to Section 3.
 
 **If Apple Container is NOT installed:** Ask the user:
-> BioClaw needs a container runtime for isolated agent execution. You have two options:
+> MolClaw needs a container runtime for isolated agent execution. You have two options:
 >
 > 1. **Apple Container** (default) - macOS-native, lightweight, designed for Apple silicon
 > 2. **Docker** - Cross-platform, widely used, works on macOS and Linux
@@ -64,7 +64,7 @@ container system start
 container --version
 ```
 
-**Note:** BioClaw automatically starts the Apple Container system when it launches, so you don't need to start it manually after reboots.
+**Note:** MolClaw automatically starts the Apple Container system when it launches, so you don't need to start it manually after reboots.
 
 #### Option B: Docker
 
@@ -119,21 +119,21 @@ KEY=$(grep "^ANTHROPIC_API_KEY=" .env | cut -d= -f2)
 
 ## 4. Build Container Image
 
-Build the BioClaw agent container:
+Build the MolClaw agent container:
 
 ```bash
 ./container/build.sh
 ```
 
-This creates the `bioclaw-agent:latest` image with Node.js, Chromium, Claude Code CLI, and agent-browser.
+This creates the `molclaw-agent:latest` image with Node.js, Chromium, Claude Code CLI, and agent-browser.
 
 Verify the build succeeded by running a simple test (this auto-detects which runtime you're using):
 
 ```bash
 if which docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  echo '{}' | docker run -i --entrypoint /bin/echo bioclaw-agent:latest "Container OK" || echo "Container build failed"
+  echo '{}' | docker run -i --entrypoint /bin/echo molclaw-agent:latest "Container OK" || echo "Container build failed"
 else
-  echo '{}' | container run -i --entrypoint /bin/echo bioclaw-agent:latest "Container OK" || echo "Container build failed"
+  echo '{}' | container run -i --entrypoint /bin/echo molclaw-agent:latest "Container OK" || echo "Container build failed"
 fi
 ```
 
@@ -291,7 +291,7 @@ Store their choice for use in the steps below.
 > - Can see messages from ALL other registered groups
 > - Can manage and delete tasks across all groups
 > - Can write to global memory that all groups can read
-> - Has read-write access to the entire BioClaw project
+> - Has read-write access to the entire MolClaw project
 >
 > **Recommendation:** Use your personal "Message Yourself" chat or a solo WhatsApp group as your main channel. This ensures only you have admin control.
 >
@@ -305,7 +305,7 @@ Store their choice for use in the steps below.
 
 If they choose option 4, ask a follow-up:
 
-> You've chosen a group with other people. This means everyone in that group will have admin privileges over BioClaw.
+> You've chosen a group with other people. This means everyone in that group will have admin privileges over MolClaw.
 >
 > Are you sure you want to proceed? The other members will be able to:
 > - Read messages from your other registered chats
@@ -389,7 +389,7 @@ mkdir -p groups/main/logs
 ## 7. Configure External Directory Access (Mount Allowlist)
 
 Ask the user:
-> Do you want the agent to be able to access any directories **outside** the BioClaw project?
+> Do you want the agent to be able to access any directories **outside** the MolClaw project?
 >
 > Examples: Git repositories, project folders, documents you want Claude to work on.
 >
@@ -398,8 +398,8 @@ Ask the user:
 If **no**, create an empty allowlist to make this explicit:
 
 ```bash
-mkdir -p ~/.config/bioclaw
-cat > ~/.config/bioclaw/mount-allowlist.json << 'EOF'
+mkdir -p ~/.config/molclaw
+cat > ~/.config/molclaw/mount-allowlist.json << 'EOF'
 {
   "allowedRoots": [],
   "blockedPatterns": [],
@@ -442,13 +442,13 @@ Ask the user:
 Create the allowlist file based on their answers:
 
 ```bash
-mkdir -p ~/.config/bioclaw
+mkdir -p ~/.config/molclaw
 ```
 
 Then write the JSON file. Example for a user who wants `~/projects` (read-write) and `~/docs` (read-only) with non-main read-only:
 
 ```bash
-cat > ~/.config/bioclaw/mount-allowlist.json << 'EOF'
+cat > ~/.config/molclaw/mount-allowlist.json << 'EOF'
 {
   "allowedRoots": [
     {
@@ -471,7 +471,7 @@ EOF
 Verify the file:
 
 ```bash
-cat ~/.config/bioclaw/mount-allowlist.json
+cat ~/.config/molclaw/mount-allowlist.json
 ```
 
 Tell the user:
@@ -482,7 +482,7 @@ Tell the user:
 > **Security notes:**
 > - Sensitive paths (`.ssh`, `.gnupg`, `.aws`, credentials) are always blocked
 > - This config file is stored outside the project, so agents cannot modify it
-> - Changes require restarting the BioClaw service
+> - Changes require restarting the MolClaw service
 >
 > To grant a group access to a directory, add it to their config in `data/registered_groups.json`:
 > ```json
@@ -503,13 +503,13 @@ NODE_PATH=$(which node)
 PROJECT_PATH=$(pwd)
 HOME_PATH=$HOME
 
-cat > ~/Library/LaunchAgents/com.bioclaw.plist << EOF
+cat > ~/Library/LaunchAgents/com.molclaw.plist << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.bioclaw</string>
+    <string>com.molclaw</string>
     <key>ProgramArguments</key>
     <array>
         <string>${NODE_PATH}</string>
@@ -529,9 +529,9 @@ cat > ~/Library/LaunchAgents/com.bioclaw.plist << EOF
         <string>${HOME_PATH}</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>${PROJECT_PATH}/logs/bioclaw.log</string>
+    <string>${PROJECT_PATH}/logs/molclaw.log</string>
     <key>StandardErrorPath</key>
-    <string>${PROJECT_PATH}/logs/bioclaw.error.log</string>
+    <string>${PROJECT_PATH}/logs/molclaw.error.log</string>
 </dict>
 </plist>
 EOF
@@ -546,12 +546,12 @@ Build and start the service:
 ```bash
 npm run build
 mkdir -p logs
-launchctl load ~/Library/LaunchAgents/com.bioclaw.plist
+launchctl load ~/Library/LaunchAgents/com.molclaw.plist
 ```
 
 Verify it's running:
 ```bash
-launchctl list | grep bioclaw
+launchctl list | grep molclaw
 ```
 
 ## 9. Test
@@ -563,14 +563,14 @@ Tell the user (using the assistant name they configured):
 
 Check the logs:
 ```bash
-tail -f logs/bioclaw.log
+tail -f logs/molclaw.log
 ```
 
 The user should receive a response in WhatsApp.
 
 ## Troubleshooting
 
-**Service not starting**: Check `logs/bioclaw.error.log`
+**Service not starting**: Check `logs/molclaw.error.log`
 
 **Container agent fails with "Claude Code process exited with code 1"**:
 - Ensure the container runtime is running:
@@ -583,9 +583,9 @@ The user should receive a response in WhatsApp.
 - Main channel doesn't require a prefix — all messages are processed
 - Personal/solo chats with `requiresTrigger: false` also don't need a prefix
 - Check that the chat JID is in the database: `sqlite3 store/messages.db "SELECT * FROM registered_groups"`
-- Check `logs/bioclaw.log` for errors
+- Check `logs/molclaw.log` for errors
 
-**Messages sent but not received by BioClaw (DMs)**:
+**Messages sent but not received by MolClaw (DMs)**:
 - WhatsApp may use LID (Linked Identity) JIDs for DMs instead of phone numbers
 - Check logs for `Translated LID to phone JID` — if missing, the LID isn't being resolved
 - The `translateJid` method in `src/channels/whatsapp.ts` uses `sock.signalRepository.lidMapping.getPNForLID()` to resolve LIDs
@@ -594,9 +594,9 @@ The user should receive a response in WhatsApp.
 **WhatsApp disconnected**:
 - The service will show a macOS notification
 - Run `npm run auth` to re-authenticate
-- Restart the service: `launchctl kickstart -k gui/$(id -u)/com.bioclaw`
+- Restart the service: `launchctl kickstart -k gui/$(id -u)/com.molclaw`
 
 **Unload service**:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.bioclaw.plist
+launchctl unload ~/Library/LaunchAgents/com.molclaw.plist
 ```

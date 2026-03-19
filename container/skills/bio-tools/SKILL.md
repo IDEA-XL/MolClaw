@@ -5,7 +5,7 @@ description: Biology research tools reference. Always available inside agent con
 
 # Bio Tools Reference
 
-You are running inside a BioClaw container with the following biology tools pre-installed.
+You are running inside a MolClaw container with the following biology tools pre-installed.
 
 ## Quick Reference
 
@@ -69,7 +69,7 @@ for record in SeqIO.parse("input.fa", "fasta"):
 
 # Fetch from NCBI
 from Bio import Entrez
-Entrez.email = "bioclaw@example.com"
+Entrez.email = "molclaw@example.com"
 handle = Entrez.efetch(db="nucleotide", id="NM_000546", rettype="fasta")
 record = SeqIO.read(handle, "fasta")
 

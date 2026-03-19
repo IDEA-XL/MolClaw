@@ -17,7 +17,7 @@ import {
 const tempDirs: string[] = [];
 
 function createTempDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bioclaw-skill-int-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'molclaw-skill-int-'));
   tempDirs.push(dir);
   return dir;
 }

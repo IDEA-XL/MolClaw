@@ -29,7 +29,7 @@ def get_interactions(genes, species=9606, score_threshold=400):
         "identifiers": "%0d".join(genes),
         "species": species,
         "required_score": score_threshold,
-        "caller_identity": "bioclaw"
+        "caller_identity": "molclaw"
     }
     r = requests.get(url, params=params)
     r.raise_for_status()
@@ -41,7 +41,7 @@ def get_enrichment(genes, species=9606):
     params = {
         "identifiers": "%0d".join(genes),
         "species": species,
-        "caller_identity": "bioclaw"
+        "caller_identity": "molclaw"
     }
     r = requests.get(url, params=params)
     r.raise_for_status()
@@ -54,7 +54,7 @@ def get_partners(gene, species=9606, limit=10):
         "identifiers": gene,
         "species": species,
         "limit": limit,
-        "caller_identity": "bioclaw"
+        "caller_identity": "molclaw"
     }
     r = requests.get(url, params=params)
     r.raise_for_status()
@@ -66,7 +66,7 @@ def download_network_image(genes, species=9606, output_path="/workspace/group/ne
     params = {
         "identifiers": "%0d".join(genes),
         "species": species,
-        "caller_identity": "bioclaw"
+        "caller_identity": "molclaw"
     }
     r = requests.get(url, params=params)
     with open(output_path, 'wb') as f:

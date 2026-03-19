@@ -1,4 +1,4 @@
-# BioClaw Debug Checklist
+# MolClaw Debug Checklist
 
 ## Known Issues (2026-02-08)
 
@@ -15,23 +15,23 @@ Both timers fire at the same time, so containers always exit via hard SIGKILL (c
 
 ```bash
 # 1. Is the service running?
-launchctl list | grep bioclaw
-# Expected: PID  0  com.bioclaw (PID = running, "-" = not running, non-zero exit = crashed)
+launchctl list | grep molclaw
+# Expected: PID  0  com.molclaw (PID = running, "-" = not running, non-zero exit = crashed)
 
 # 2. Any running containers?
-container ls --format '{{.Names}} {{.Status}}' 2>/dev/null | grep bioclaw
+container ls --format '{{.Names}} {{.Status}}' 2>/dev/null | grep molclaw
 
 # 3. Any stopped/orphaned containers?
-container ls -a --format '{{.Names}} {{.Status}}' 2>/dev/null | grep bioclaw
+container ls -a --format '{{.Names}} {{.Status}}' 2>/dev/null | grep molclaw
 
 # 4. Recent errors in service log?
-grep -E 'ERROR|WARN' logs/bioclaw.log | tail -20
+grep -E 'ERROR|WARN' logs/molclaw.log | tail -20
 
 # 5. Is WhatsApp connected? (look for last connection event)
-grep -E 'Connected to WhatsApp|Connection closed|connection.*close' logs/bioclaw.log | tail -5
+grep -E 'Connected to WhatsApp|Connection closed|connection.*close' logs/molclaw.log | tail -5
 
 # 6. Are groups loaded?
-grep 'groupCount' logs/bioclaw.log | tail -3
+grep 'groupCount' logs/molclaw.log | tail -3
 ```
 
 ## Session Transcript Branching
@@ -62,7 +62,7 @@ for i, line in enumerate(lines):
 
 ```bash
 # Check for recent timeouts
-grep -E 'Container timeout|timed out' logs/bioclaw.log | tail -10
+grep -E 'Container timeout|timed out' logs/molclaw.log | tail -10
 
 # Check container log files for the timed-out container
 ls -lt groups/*/logs/container-*.log | head -10
@@ -71,23 +71,23 @@ ls -lt groups/*/logs/container-*.log | head -10
 cat groups/<group>/logs/container-<timestamp>.log
 
 # Check if retries were scheduled and what happened
-grep -E 'Scheduling retry|retry|Max retries' logs/bioclaw.log | tail -10
+grep -E 'Scheduling retry|retry|Max retries' logs/molclaw.log | tail -10
 ```
 
 ## Agent Not Responding
 
 ```bash
 # Check if messages are being received from WhatsApp
-grep 'New messages' logs/bioclaw.log | tail -10
+grep 'New messages' logs/molclaw.log | tail -10
 
 # Check if messages are being processed (container spawned)
-grep -E 'Processing messages|Spawning container' logs/bioclaw.log | tail -10
+grep -E 'Processing messages|Spawning container' logs/molclaw.log | tail -10
 
 # Check if messages are being piped to active container
-grep -E 'Piped messages|sendMessage' logs/bioclaw.log | tail -10
+grep -E 'Piped messages|sendMessage' logs/molclaw.log | tail -10
 
 # Check the queue state — any active containers?
-grep -E 'Starting container|Container active|concurrency limit' logs/bioclaw.log | tail -10
+grep -E 'Starting container|Container active|concurrency limit' logs/molclaw.log | tail -10
 
 # Check lastAgentTimestamp vs latest message timestamp
 sqlite3 store/messages.db "SELECT chat_jid, MAX(timestamp) as latest FROM messages GROUP BY chat_jid ORDER BY latest DESC LIMIT 5;"
@@ -97,24 +97,24 @@ sqlite3 store/messages.db "SELECT chat_jid, MAX(timestamp) as latest FROM messag
 
 ```bash
 # Check mount validation logs (shows on container spawn)
-grep -E 'Mount validated|Mount.*REJECTED|mount' logs/bioclaw.log | tail -10
+grep -E 'Mount validated|Mount.*REJECTED|mount' logs/molclaw.log | tail -10
 
 # Verify the mount allowlist is readable
-cat ~/.config/bioclaw/mount-allowlist.json
+cat ~/.config/molclaw/mount-allowlist.json
 
 # Check group's container_config in DB
 sqlite3 store/messages.db "SELECT name, container_config FROM registered_groups;"
 
 # Test-run a container to check mounts (dry run)
 # Replace <group-folder> with the group's folder name
-container run -i --rm --entrypoint ls bioclaw-agent:latest /workspace/extra/
+container run -i --rm --entrypoint ls molclaw-agent:latest /workspace/extra/
 ```
 
 ## WhatsApp Auth Issues
 
 ```bash
 # Check if QR code was requested (means auth expired)
-grep 'QR\|authentication required\|qr' logs/bioclaw.log | tail -5
+grep 'QR\|authentication required\|qr' logs/molclaw.log | tail -5
 
 # Check auth files exist
 ls -la store/auth/
@@ -127,17 +127,17 @@ npm run auth
 
 ```bash
 # Restart the service
-launchctl kickstart -k gui/$(id -u)/com.bioclaw
+launchctl kickstart -k gui/$(id -u)/com.molclaw
 
 # View live logs
-tail -f logs/bioclaw.log
+tail -f logs/molclaw.log
 
 # Stop the service (careful — running containers are detached, not killed)
-launchctl bootout gui/$(id -u)/com.bioclaw
+launchctl bootout gui/$(id -u)/com.molclaw
 
 # Start the service
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bioclaw.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.molclaw.plist
 
 # Rebuild after code changes
-npm run build && launchctl kickstart -k gui/$(id -u)/com.bioclaw
+npm run build && launchctl kickstart -k gui/$(id -u)/com.molclaw
 ```

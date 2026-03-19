@@ -33,15 +33,15 @@ export interface DiscordChannelOpts {
 const SESSION_RESET_SLASH_COMMANDS = [
   {
     name: 'newsession',
-    description: 'Start a new BioClaw session for this chat',
+    description: 'Start a new MolClaw session for this chat',
   },
   {
     name: 'reset_session',
-    description: 'Reset current BioClaw session for this chat',
+    description: 'Reset current MolClaw session for this chat',
   },
   {
     name: 'reset',
-    description: 'Reset current BioClaw session for this chat',
+    description: 'Reset current MolClaw session for this chat',
   },
 ] as const;
 
@@ -386,7 +386,7 @@ export class DiscordChannel implements Channel {
       });
 
       if (!group) {
-        const content = 'This channel is not registered for BioClaw.';
+        const content = 'This channel is not registered for MolClaw.';
         if (interaction.replied || interaction.deferred) {
           await interaction.followUp({ content, ephemeral: !isDm });
         } else {
@@ -476,7 +476,7 @@ export class DiscordChannel implements Channel {
 
       // Translate Discord @bot mentions into TRIGGER_PATTERN format.
       // Discord mentions look like <@botUserId> — these won't match
-      // TRIGGER_PATTERN (e.g., ^@Bioclaw\\b), so we prepend the trigger
+      // TRIGGER_PATTERN (e.g., ^@MolClaw\\b), so we prepend the trigger
       // when the bot is @mentioned.
       if (this.client?.user) {
         const botId = this.client.user.id;

@@ -1,5 +1,5 @@
 #!/bin/bash
-# BioClaw CLI Test - runs a single prompt through the container agent
+# MolClaw CLI Test - runs a single prompt through the container agent
 # Usage: ./scripts/test-cli.sh "your biology question here"
 # The container auto-exits after the first result.
 
@@ -8,8 +8,8 @@ set -e
 PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 PROMPT="${1:-Write a Python script using BioPython to translate ATGGAGGAGCCGCAGTCAGATCCTAGCGTG to protein and calculate GC content. Run it and show results.}"
 
-IPC_DIR="/tmp/bioclaw-test/ipc"
-CLAUDE_DIR="/tmp/bioclaw-test/.claude"
+IPC_DIR="/tmp/molclaw-test/ipc"
+CLAUDE_DIR="/tmp/molclaw-test/.claude"
 
 # Clean up from previous runs
 rm -rf "$IPC_DIR" "$CLAUDE_DIR"
@@ -42,7 +42,7 @@ print(json.dumps({
 
 echo ""
 echo "========================================"
-echo "  BioClaw - Local Test"
+echo "  MolClaw - Local Test"
 echo "========================================"
 echo ""
 echo "Prompt: $PROMPT"
@@ -58,13 +58,13 @@ docker run -i --rm \
     -v "$CLAUDE_DIR:/home/node/.claude" \
     -v "$IPC_DIR:/workspace/ipc" \
     -v "$PROJ/container/agent-runner/src:/app/src:ro" \
-    bioclaw-agent:latest <<< "$INPUT_JSON" 2>/tmp/bioclaw-stderr.log &
+    molclaw-agent:latest <<< "$INPUT_JSON" 2>/tmp/molclaw-stderr.log &
 
 CONTAINER_PID=$!
 
 # Monitor for results and auto-close
 (
-    # Wait for the first BIOCLAW_OUTPUT_END marker, then send close
+    # Wait for the first MOLCLAW_OUTPUT_END marker, then send close
     while kill -0 $CONTAINER_PID 2>/dev/null; do
         if [ -f "$IPC_DIR/input/_close" ]; then
             break
@@ -79,11 +79,11 @@ OUTPUT=""
 FOUND_RESULT=0
 
 while IFS= read -r line; do
-    if [[ "$line" == *"BIOCLAW_OUTPUT_START"* ]]; then
+    if [[ "$line" == *"MOLCLAW_OUTPUT_START"* ]]; then
         OUTPUT=""
         continue
     fi
-    if [[ "$line" == *"BIOCLAW_OUTPUT_END"* ]]; then
+    if [[ "$line" == *"MOLCLAW_OUTPUT_END"* ]]; then
         FOUND_RESULT=1
         # Parse and display the result
         RESULT=$(echo "$OUTPUT" | python3 -c "
@@ -129,7 +129,7 @@ if [ $FOUND_RESULT -eq 1 ]; then
 else
     echo "Container exited with code $EXIT_CODE (no result found)"
     echo "Stderr:"
-    tail -20 /tmp/bioclaw-stderr.log 2>/dev/null
+    tail -20 /tmp/molclaw-stderr.log 2>/dev/null
 fi
 
 # Show any files created in workspace

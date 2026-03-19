@@ -1,5 +1,5 @@
 {
-  "name": "bioclaw",
+  "name": "molclaw",
   "version": "0.1.0",
   "description": "AI-powered biology research assistant. Run BLAST, sequence analysis, and molecular tools from WhatsApp. Built on Claude Agent SDK.",
   "type": "module",

@@ -75,9 +75,9 @@ interface ParsedMemoryMetadata {
   updatedAt?: string;
 }
 
-const MEMORY_ENTRY_START = '<!-- BIOCLAW_MEMORY_ENTRY_START ';
-const MEMORY_ENTRY_END = '<!-- BIOCLAW_MEMORY_ENTRY_END -->';
-const MEMORY_HEADER = `# BioClaw Memory
+const MEMORY_ENTRY_START = '<!-- MOLCLAW_MEMORY_ENTRY_START ';
+const MEMORY_ENTRY_END = '<!-- MOLCLAW_MEMORY_ENTRY_END -->';
+const MEMORY_HEADER = `# MolClaw Memory
 
 This file stores durable memory entries for this scope.
 Entries are human-readable Markdown with machine-readable metadata comments.
@@ -206,7 +206,7 @@ function parseMemoryEntriesFromFile(
   }
 
   const content = fs.readFileSync(filePath, 'utf-8');
-  const pattern = /<!-- BIOCLAW_MEMORY_ENTRY_START ([\s\S]*?) -->\n([\s\S]*?)\n<!-- BIOCLAW_MEMORY_ENTRY_END -->/g;
+  const pattern = /<!-- MOLCLAW_MEMORY_ENTRY_START ([\s\S]*?) -->\n([\s\S]*?)\n<!-- MOLCLAW_MEMORY_ENTRY_END -->/g;
   const entries: MemoryEntry[] = [];
 
   for (const match of content.matchAll(pattern)) {

@@ -13,7 +13,7 @@ import {
 const tempDirs: string[] = [];
 
 function createTempDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bioclaw-session-rollup-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'molclaw-session-rollup-'));
   tempDirs.push(dir);
   return dir;
 }

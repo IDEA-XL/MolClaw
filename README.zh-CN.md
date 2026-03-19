@@ -1,10 +1,10 @@
-# BioClaw
+# MolClaw
 
 ### 面向生物信息学研究的 AI 助手（WhatsApp / QQ + DeepSeek）
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-BioClaw 将常见生物信息学任务带到聊天界面中。你可以通过自然语言触发 BLAST、结构可视化、绘图、QC、文献检索等流程。
+MolClaw 将常见生物信息学任务带到聊天界面中。你可以通过自然语言触发 BLAST、结构可视化、绘图、QC、文献检索等流程。
 
 默认通道是 WhatsApp；也可以按项目方式扩展到 QQ + DeepSeek 工作流（见下方示例）。
 
@@ -20,8 +20,8 @@ BioClaw 将常见生物信息学任务带到聊天界面中。你可以通过自
 ### 安装
 
 ```bash
-git clone https://github.com/Runchuan-BU/BioClaw.git
-cd BioClaw
+git clone https://github.com/Runchuan-BU/MolClaw.git
+cd MolClaw
 npm install
 cp .env.example .env
 # 编辑 .env，填入你的 OpenAI 兼容模型网关配置，例如：
@@ -36,7 +36,7 @@ npm start
 在已接入的群里发送：
 
 ```text
-@Bioclaw <你的请求>
+@MolClaw <你的请求>
 ```
 
 ## Second Quick Start
@@ -44,7 +44,7 @@ npm start
 如果希望更“无脑”地引导安装，给 OpenClaw 发送：
 
 ```text
-install https://github.com/Runchuan-BU/BioClaw
+install https://github.com/Runchuan-BU/MolClaw
 ```
 
 ## QQ + DeepSeek 示例

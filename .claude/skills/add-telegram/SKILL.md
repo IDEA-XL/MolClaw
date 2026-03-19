@@ -5,7 +5,7 @@ description: Add Telegram as a channel. Can replace WhatsApp entirely or run alo
 
 # Add Telegram Channel
 
-This skill adds Telegram support to BioClaw. Users can choose to:
+This skill adds Telegram support to MolClaw. Users can choose to:
 
 1. **Replace WhatsApp** - Use Telegram as the only messaging channel
 2. **Add alongside WhatsApp** - Both channels active
@@ -81,7 +81,7 @@ Before making changes, ask:
 
 ## Architecture
 
-BioClaw uses a **Channel abstraction** (`Channel` interface in `src/types.ts`). Each messaging platform implements this interface. Key files:
+MolClaw uses a **Channel abstraction** (`Channel` interface in `src/types.ts`). Each messaging platform implements this interface. Key files:
 
 | File | Purpose |
 |------|---------|
@@ -548,14 +548,14 @@ Alternatively, if the agent is already running in the main group, it can registe
 
 ```bash
 npm run build
-launchctl kickstart -k gui/$(id -u)/com.bioclaw
+launchctl kickstart -k gui/$(id -u)/com.molclaw
 ```
 
 Or for systemd:
 
 ```bash
 npm run build
-systemctl --user restart bioclaw
+systemctl --user restart molclaw
 ```
 
 ### Step 7: Test
@@ -566,7 +566,7 @@ Tell the user:
 > - For main chat: Any message works
 > - For non-main: `@Bio hello` or @mention the bot
 >
-> Check logs: `tail -f logs/bioclaw.log`
+> Check logs: `tail -f logs/molclaw.log`
 
 ## Replace WhatsApp Entirely
 
@@ -609,7 +609,7 @@ Check:
 1. `TELEGRAM_BOT_TOKEN` is set in `.env` AND synced to `data/env/env`
 2. Chat is registered in SQLite (check with: `sqlite3 store/messages.db "SELECT * FROM registered_groups WHERE jid LIKE 'tg:%'"`)
 3. For non-main chats: message includes trigger pattern
-4. Service is running: `launchctl list | grep bioclaw`
+4. Service is running: `launchctl list | grep molclaw`
 
 ### Bot only responds to @mentions in groups
 
@@ -622,16 +622,16 @@ The bot has Group Privacy enabled (default). It can only see messages that @ment
 
 If `/chatid` doesn't work:
 - Verify bot token is valid: `curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe"`
-- Check bot is started: `tail -f logs/bioclaw.log`
+- Check bot is started: `tail -f logs/molclaw.log`
 
 ### Service conflicts
 
 If running `npm run dev` while launchd service is active:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.bioclaw.plist
+launchctl unload ~/Library/LaunchAgents/com.molclaw.plist
 npm run dev
 # When done testing:
-launchctl load ~/Library/LaunchAgents/com.bioclaw.plist
+launchctl load ~/Library/LaunchAgents/com.molclaw.plist
 ```
 
 ## Agent Swarms (Teams)
@@ -653,4 +653,4 @@ To remove Telegram integration:
 5. Remove Telegram config (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_ONLY`) from `src/config.ts`
 6. Remove Telegram registrations from SQLite: `sqlite3 store/messages.db "DELETE FROM registered_groups WHERE jid LIKE 'tg:%'"`
 7. Uninstall: `npm uninstall grammy`
-8. Rebuild: `npm run build && launchctl kickstart -k gui/$(id -u)/com.bioclaw`
+8. Rebuild: `npm run build && launchctl kickstart -k gui/$(id -u)/com.molclaw`

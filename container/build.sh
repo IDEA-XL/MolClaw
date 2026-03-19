@@ -1,16 +1,16 @@
 #!/bin/bash
-# Build the BioClaw agent container image
+# Build the MolClaw agent container image
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-IMAGE_NAME="bioclaw-agent"
+IMAGE_NAME="molclaw-agent"
 TAG="${1:-latest}"
 USER_BASE_IMAGE="${2:-${BASE_IMAGE:-}}"
 
-echo "Building BioClaw agent container image..."
+echo "Building MolClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
 
 if ! command -v docker >/dev/null 2>&1; then

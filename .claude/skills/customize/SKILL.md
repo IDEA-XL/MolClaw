@@ -1,9 +1,9 @@
 ---
 name: customize
-description: Add new capabilities or modify BioClaw behavior. Use when user wants to add channels (Telegram, Slack, email input), change triggers, add integrations, modify the router, or make any other customizations. This is an interactive skill that asks questions to understand what the user wants.
+description: Add new capabilities or modify MolClaw behavior. Use when user wants to add channels (Telegram, Slack, email input), change triggers, add integrations, modify the router, or make any other customizations. This is an interactive skill that asks questions to understand what the user wants.
 ---
 
-# BioClaw Customization
+# MolClaw Customization
 
 This skill helps users add capabilities or modify behavior. Use AskUserQuestion to understand what they want before making changes.
 
@@ -92,8 +92,8 @@ Always tell the user:
 ```bash
 # Rebuild and restart
 npm run build
-launchctl unload ~/Library/LaunchAgents/com.bioclaw.plist
-launchctl load ~/Library/LaunchAgents/com.bioclaw.plist
+launchctl unload ~/Library/LaunchAgents/com.molclaw.plist
+launchctl load ~/Library/LaunchAgents/com.molclaw.plist
 ```
 
 ## Example Interaction

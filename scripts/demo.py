@@ -1,4 +1,4 @@
-"""BioClaw Demo: TP53 Tumor Suppressor Gene Analysis"""
+"""MolClaw Demo: TP53 Tumor Suppressor Gene Analysis"""
 import re
 from Bio.Seq import Seq
 from Bio.SeqUtils import gc_fraction, MeltingTemp as mt
@@ -12,7 +12,7 @@ tp53 = Seq(
 )
 
 print("=" * 55)
-print("  BioClaw: TP53 Tumor Suppressor Gene Analysis")
+print("  MolClaw: TP53 Tumor Suppressor Gene Analysis")
 print("=" * 55)
 
 # 1. Basic Stats

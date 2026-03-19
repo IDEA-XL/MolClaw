@@ -4,7 +4,7 @@ export function getDashboardHtml(): string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>BioClaw Dashboard</title>
+  <title>MolClaw Dashboard</title>
   <style>
     :root {
       color-scheme: light;

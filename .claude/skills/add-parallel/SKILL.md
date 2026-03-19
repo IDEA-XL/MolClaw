@@ -1,18 +1,18 @@
 # Add Parallel AI Integration
 
-Adds Parallel AI MCP integration to BioClaw for advanced web research capabilities.
+Adds Parallel AI MCP integration to MolClaw for advanced web research capabilities.
 
 ## What This Adds
 
 - **Quick Search** - Fast web lookups using Parallel Search API (free to use)
 - **Deep Research** - Comprehensive analysis using Parallel Task API (asks permission)
-- **Non-blocking Design** - Uses BioClaw scheduler for result polling (no container blocking)
+- **Non-blocking Design** - Uses MolClaw scheduler for result polling (no container blocking)
 
 ## Prerequisites
 
 User must have:
 1. Parallel AI API key from https://platform.parallel.ai
-2. BioClaw already set up and running
+2. MolClaw already set up and running
 3. Container system working (Apple Container or Docker)
 
 ## Implementation Steps
@@ -84,14 +84,14 @@ Update `container/agent-runner/src/index.ts`:
 Find the section where `mcpServers` is configured (around line 237-252):
 ```typescript
 const mcpServers: Record<string, any> = {
-  bioclaw: ipcMcp
+  molclaw: ipcMcp
 };
 ```
 
-Add Parallel AI MCP servers after the bioclaw server:
+Add Parallel AI MCP servers after the molclaw server:
 ```typescript
 const mcpServers: Record<string, any> = {
-  bioclaw: ipcMcp
+  molclaw: ipcMcp
 };
 
 // Add Parallel AI MCP servers if API key is available
@@ -123,7 +123,7 @@ allowedTools: [
   'Bash',
   'Read', 'Write', 'Edit', 'Glob', 'Grep',
   'WebSearch', 'WebFetch',
-  'mcp__bioclaw__*',
+  'mcp__molclaw__*',
   'mcp__parallel-search__*',
   'mcp__parallel-task__*'
 ],
@@ -180,14 +180,14 @@ I can do deep research on [topic] using Parallel's Task API. This will take
 
 1. Create the task using `mcp__parallel-task__create_task_run`
 2. Get the `run_id` from the response
-3. Create a polling scheduled task using `mcp__bioclaw__schedule_task`:
+3. Create a polling scheduled task using `mcp__molclaw__schedule_task`:
    ```
    Prompt: "Check Parallel AI task run [run_id] and send results when ready.
 
    1. Use the Parallel Task MCP to check the task status
    2. If status is 'completed', extract the results
-   3. Send results to user with mcp__bioclaw__send_message
-   4. Use mcp__bioclaw__complete_scheduled_task to mark this task as done
+   3. Send results to user with mcp__molclaw__send_message
+   4. Use mcp__molclaw__complete_scheduled_task to mark this task as done
 
    If status is still 'running' or 'pending', do nothing (task will run again in 30s).
    If status is 'failed', send error message and complete the task."
@@ -231,7 +231,7 @@ The build script will automatically:
 
 Verify the build:
 ```bash
-echo '{}' | container run -i --entrypoint /bin/echo bioclaw-agent:latest "Container OK"
+echo '{}' | container run -i --entrypoint /bin/echo molclaw-agent:latest "Container OK"
 ```
 
 ### 7. Restart Service
@@ -240,13 +240,13 @@ Rebuild the main app and restart:
 
 ```bash
 npm run build
-launchctl kickstart -k gui/$(id -u)/com.bioclaw
+launchctl kickstart -k gui/$(id -u)/com.molclaw
 ```
 
 Wait 3 seconds for service to start, then verify:
 ```bash
 sleep 3
-launchctl list | grep bioclaw
+launchctl list | grep molclaw
 ```
 
 ### 8. Test Integration
@@ -262,7 +262,7 @@ Tell the user to test:
 
 Check logs to verify MCP servers loaded:
 ```bash
-tail -20 logs/bioclaw.log
+tail -20 logs/molclaw.log
 ```
 
 Look for: `Parallel AI MCP servers configured`
@@ -281,7 +281,7 @@ Look for: `Parallel AI MCP servers configured`
 
 **Task polling not working:**
 - Verify scheduled task was created: `sqlite3 store/messages.db "SELECT * FROM scheduled_tasks"`
-- Check task runs: `tail -f logs/bioclaw.log | grep "scheduled task"`
+- Check task runs: `tail -f logs/molclaw.log | grep "scheduled task"`
 - Ensure task prompt includes proper Parallel MCP tool names
 
 ## Uninstalling
@@ -292,4 +292,4 @@ To remove Parallel AI integration:
 2. Revert changes to container-runner.ts and agent-runner/src/index.ts
 3. Remove Web Research Tools section from groups/main/CLAUDE.md
 4. Rebuild: `./container/build.sh && npm run build`
-5. Restart: `launchctl kickstart -k gui/$(id -u)/com.bioclaw`
+5. Restart: `launchctl kickstart -k gui/$(id -u)/com.molclaw`

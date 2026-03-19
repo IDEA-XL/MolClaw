@@ -1,8 +1,8 @@
-# BioClaw Skill Runtime 实施计划
+# MolClaw Skill Runtime 实施计划
 
 ## 1. 文档目的
 
-这份文档用于把 BioClaw 的 skill 能力从“仅复制 skill 文件到 `.claude/skills`”升级为“模型无关、可索引、可选择、可按需加载”的运行时能力。
+这份文档用于把 MolClaw 的 skill 能力从“仅复制 skill 文件到 `.claude/skills`”升级为“模型无关、可索引、可选择、可按需加载”的运行时能力。
 
 目标不是复刻 Claude Code 的全部能力，而是先落地一个可工作的最小闭环，然后为后续增强版预留扩展位。
 
@@ -10,9 +10,9 @@
 
 ## 2. 当前结论
 
-### 2.1 BioClaw 现在做了什么
+### 2.1 MolClaw 现在做了什么
 
-当前 BioClaw 只做了 skill 文件同步，没有做 skill runtime。
+当前 MolClaw 只做了 skill 文件同步，没有做 skill runtime。
 
 已确认行为：
 
@@ -30,9 +30,9 @@
 
 这意味着：
 
-1. Claude Code CLI 自带的 skill 机制如果不存在，BioClaw 自身不会补上
+1. Claude Code CLI 自带的 skill 机制如果不存在，MolClaw 自身不会补上
 2. 切到非 Claude 模型时，模型不可能“凭空知道”去读取 `.claude/skills`
-3. 当前 skill 目录对 BioClaw runtime 来说基本是死数据
+3. 当前 skill 目录对 MolClaw runtime 来说基本是死数据
 
 ### 2.2 相关源码位置
 
@@ -90,14 +90,14 @@ Qwen 的关键特征：
 
 结论：
 
-- Qwen Code 适合作为 BioClaw v1 的直接蓝本
-- Claude Code 适合作为 BioClaw v2 的增强方向
+- Qwen Code 适合作为 MolClaw v1 的直接蓝本
+- Claude Code 适合作为 MolClaw v2 的增强方向
 
 ---
 
-## 4. BioClaw 要解决的问题
+## 4. MolClaw 要解决的问题
 
-BioClaw 需要解决的是下面这四步：
+MolClaw 需要解决的是下面这四步：
 
 1. `discover`
    - 从 skill 目录发现 skill
@@ -246,8 +246,8 @@ export interface SkillRegistry {
 
 后续可以扩展：
 
-- `/workspace/group/.bioclaw/skills`
-- `/workspace/project/.bioclaw/skills`
+- `/workspace/group/.molclaw/skills`
+- `/workspace/project/.molclaw/skills`
 - extension-like skills
 - system skills
 
@@ -630,7 +630,7 @@ Phase 2 再加缓存和 smarter selection。
 
 ### 目标
 
-让 BioClaw 在任意支持 function calling 的模型上，都能按需使用 `.claude/skills`。
+让 MolClaw 在任意支持 function calling 的模型上，都能按需使用 `.claude/skills`。
 
 ### 实施项
 
@@ -768,7 +768,7 @@ Phase 2 再加缓存和 smarter selection。
 
 ## 17. 运行约束在哪里
 
-目前这些运行约束不在 skill 里，而是在 BioClaw runtime 代码里：
+目前这些运行约束不在 skill 里，而是在 MolClaw runtime 代码里：
 
 - 最大 tool 轮数
 - tool 输出长度上限
@@ -946,7 +946,7 @@ Review code with emphasis on:
 
 满足以下条件，Phase 1 才算完成：
 
-1. BioClaw 不再依赖 Claude Code 私有 skill runtime
+1. MolClaw 不再依赖 Claude Code 私有 skill runtime
 2. `SKILL.md` 能被 runtime 扫描和解析
 3. provider 每轮能看到 `use_skill` tool
 4. 模型命中 skill 时能通过 `use_skill` 把 skill 正文注入上下文
@@ -962,7 +962,7 @@ Review code with emphasis on:
 这份文档落地后，建议同步更新：
 
 1. `docs/SPEC.md`
-   - 增加 BioClaw 原生 skill runtime 说明
+   - 增加 MolClaw 原生 skill runtime 说明
 2. `README.md`
    - 增加如何编写 `container/skills/<name>/SKILL.md`
 3. `docs/DEBUG_CHECKLIST.md`
@@ -972,7 +972,7 @@ Review code with emphasis on:
 
 ## 23. 一句话总结
 
-BioClaw 现在的问题不是“非 Claude 模型不支持 `.claude/skills`”，而是“BioClaw 自己还没有实现 skill runtime”。
+MolClaw 现在的问题不是“非 Claude 模型不支持 `.claude/skills`”，而是“MolClaw 自己还没有实现 skill runtime”。
 
 最务实的方案是：
 

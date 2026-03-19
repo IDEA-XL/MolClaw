@@ -1,4 +1,4 @@
-# BioClaw Dashboard 实施计划（MVP）
+# MolClaw Dashboard 实施计划（MVP）
 
 ## 1. 目标
 - 增加一个轻量 Dashboard，用于实时观测 Agent 执行过程。

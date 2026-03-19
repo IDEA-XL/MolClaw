@@ -1,5 +1,5 @@
 /**
- * Stdio MCP Server for BioClaw
+ * Stdio MCP Server for MolClaw
  * Standalone process that agent teams subagents can inherit.
  * Reads context from environment variables, writes IPC files for the host.
  */
@@ -17,9 +17,9 @@ const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 const FILES_DIR = path.join(IPC_DIR, 'files');
 
 // Context from environment variables (set by the agent runner)
-const chatJid = process.env.BIOCLAW_CHAT_JID!;
-const groupFolder = process.env.BIOCLAW_GROUP_FOLDER!;
-const isMain = process.env.BIOCLAW_IS_MAIN === '1';
+const chatJid = process.env.MOLCLAW_CHAT_JID!;
+const groupFolder = process.env.MOLCLAW_GROUP_FOLDER!;
+const isMain = process.env.MOLCLAW_IS_MAIN === '1';
 
 function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
@@ -36,7 +36,7 @@ function writeIpcFile(dir: string, data: object): string {
 }
 
 const server = new McpServer({
-  name: 'bioclaw',
+  name: 'molclaw',
   version: '1.0.0',
 });
 

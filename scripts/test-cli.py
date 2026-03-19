@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BioClaw CLI Test — run a single biology prompt through the container agent.
+MolClaw CLI Test — run a single biology prompt through the container agent.
 
 Usage:
     python3 scripts/test-cli.py "your biology question"
@@ -24,9 +24,9 @@ def pprint(*args, **kwargs):
     print(*args, **kwargs, flush=True)
 
 PROJ = Path(__file__).resolve().parent.parent
-IPC_DIR = Path("/tmp/bioclaw-test/ipc")
-CLAUDE_DIR = Path("/tmp/bioclaw-test/.claude")
-IMAGE = "bioclaw-agent:latest"
+IPC_DIR = Path("/tmp/molclaw-test/ipc")
+CLAUDE_DIR = Path("/tmp/molclaw-test/.claude")
+IMAGE = "molclaw-agent:latest"
 
 DEFAULT_PROMPT = (
     "Write and run a Python script using BioPython that:\n"
@@ -81,7 +81,7 @@ def main():
 
     pprint()
     pprint("=" * 50)
-    pprint("  BioClaw — Local CLI Test")
+    pprint("  MolClaw — Local CLI Test")
     pprint("=" * 50)
     pprint()
     pprint(f"Prompt: {prompt[:120]}{'...' if len(prompt) > 120 else ''}")
@@ -117,8 +117,8 @@ def main():
 
     results = []
     buffer = ""
-    start_marker = "---BIOCLAW_OUTPUT_START---"
-    end_marker = "---BIOCLAW_OUTPUT_END---"
+    start_marker = "---MOLCLAW_OUTPUT_START---"
+    end_marker = "---MOLCLAW_OUTPUT_END---"
     in_output = False
 
     def read_stderr():

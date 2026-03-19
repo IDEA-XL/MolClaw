@@ -1,6 +1,6 @@
 # Demo Examples
 
-This page contains practical prompts for validating a BioClaw deployment.
+This page contains practical prompts for validating a MolClaw deployment.
 
 For full mobile screenshots and copy/paste prompts, see:
 
@@ -21,7 +21,7 @@ Expected:
 ### 2) Literature search + tool trace
 
 ```text
-@Bioclaw Search PubMed for CRBN papers from 2024-2026 and return top 5 with PMID/DOI.
+@MolClaw Search PubMed for CRBN papers from 2024-2026 and return top 5 with PMID/DOI.
 ```
 
 Expected:
@@ -31,7 +31,7 @@ Expected:
 ### 3) BLAST workflow
 
 ```text
-@Bioclaw BLAST this protein sequence against nr and return top 5 hits with species, identity, e-value:
+@MolClaw BLAST this protein sequence against nr and return top 5 hits with species, identity, e-value:
 >query
 MSTNPKPQRKTKRNTNRRPQDVKFPGG
 ```
@@ -43,7 +43,7 @@ Expected:
 ### 4) Workspace file operation
 
 ```text
-@Bioclaw In /workspace/group, list files and suggest next analysis steps in <= 8 bullets.
+@MolClaw In /workspace/group, list files and suggest next analysis steps in <= 8 bullets.
 ```
 
 Expected:

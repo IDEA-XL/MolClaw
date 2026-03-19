@@ -1,10 +1,10 @@
 /**
- * Mount Security Module for BioClaw
+ * Mount Security Module for MolClaw
  *
  * Validates additional mounts against an allowlist stored OUTSIDE the project root.
  * This prevents container agents from modifying security configuration.
  *
- * Allowlist location: ~/.config/bioclaw/mount-allowlist.json
+ * Allowlist location: ~/.config/molclaw/mount-allowlist.json
  */
 import fs from 'fs';
 import path from 'path';

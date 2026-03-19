@@ -20,7 +20,7 @@ Query Gene Expression Omnibus for public expression datasets.
 from Bio import Entrez
 import json
 
-Entrez.email = "bioclaw@example.com"
+Entrez.email = "molclaw@example.com"
 
 # 1. Search GEO datasets
 def search_geo(query, max_results=10, db="gds"):

@@ -9,7 +9,7 @@ import { ClaudeSkillManager } from '../src/skills.js';
 const tempDirs: string[] = [];
 
 function createTempDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bioclaw-skill-manager-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'molclaw-skill-manager-'));
   tempDirs.push(dir);
   return dir;
 }

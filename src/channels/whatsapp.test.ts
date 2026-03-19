@@ -5,7 +5,7 @@ import { EventEmitter } from 'events';
 
 // Mock config
 vi.mock('../config.js', () => ({
-  STORE_DIR: '/tmp/bioclaw-test-store',
+  STORE_DIR: '/tmp/molclaw-test-store',
 }));
 
 // Mock logger

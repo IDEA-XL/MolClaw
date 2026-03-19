@@ -1,13 +1,13 @@
 ---
 name: x-integration
-description: X (Twitter) integration for BioClaw. Post tweets, like, reply, retweet, and quote. Use for setup, testing, or troubleshooting X functionality. Triggers on "setup x", "x integration", "twitter", "post tweet", "tweet".
+description: X (Twitter) integration for MolClaw. Post tweets, like, reply, retweet, and quote. Use for setup, testing, or troubleshooting X functionality. Triggers on "setup x", "x integration", "twitter", "post tweet", "tweet".
 ---
 
 # X (Twitter) Integration
 
 Browser automation for X interactions via WhatsApp.
 
-> **Compatibility:** BioClaw v1.0.0. Directory structure may change in future versions.
+> **Compatibility:** MolClaw v1.0.0. Directory structure may change in future versions.
 
 ## Features
 
@@ -23,7 +23,7 @@ Browser automation for X interactions via WhatsApp.
 
 Before using this skill, ensure:
 
-1. **BioClaw is installed and running** - WhatsApp connected, service active
+1. **MolClaw is installed and running** - WhatsApp connected, service active
 2. **Dependencies installed**:
    ```bash
    npm ls playwright dotenv-cli || npm install playwright dotenv-cli
@@ -49,8 +49,8 @@ npx dotenv -e .env -- npx tsx .claude/skills/x-integration/scripts/setup.ts
 
 # 3. Rebuild host and restart service
 npm run build
-launchctl kickstart -k gui/$(id -u)/com.bioclaw
-# Verify: launchctl list | grep bioclaw shows PID and exit code 0
+launchctl kickstart -k gui/$(id -u)/com.molclaw
+# Verify: launchctl list | grep molclaw shows PID and exit code 0
 ```
 
 ## Configuration
@@ -60,7 +60,7 @@ launchctl kickstart -k gui/$(id -u)/com.bioclaw
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CHROME_PATH` | `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` | Chrome executable path |
-| `BIOCLAW_ROOT` | `process.cwd()` | Project root directory |
+| `MOLCLAW_ROOT` | `process.cwd()` | Project root directory |
 | `LOG_LEVEL` | `info` | Logging level (debug, info, warn, error) |
 
 Set in `.env` file (loaded via `dotenv-cli` at runtime):
@@ -104,7 +104,7 @@ Paths relative to project root:
 |------|---------|-----|
 | `data/x-browser-profile/` | Chrome profile with X session | Ignored |
 | `data/x-auth.json` | Auth state marker | Ignored |
-| `logs/bioclaw.log` | Service logs (contains X operation logs) | Ignored |
+| `logs/molclaw.log` | Service logs (contains X operation logs) | Ignored |
 
 ## Architecture
 
@@ -153,7 +153,7 @@ Paths relative to project root:
 
 ### Integration Points
 
-To integrate this skill into BioClaw, make the following modifications:
+To integrate this skill into MolClaw, make the following modifications:
 
 ---
 
@@ -232,7 +232,7 @@ COPY .claude/skills/x-integration/agent.ts ./src/skills/x-integration/
 
 ## Setup
 
-All paths below are relative to project root (`BIOCLAW_ROOT`).
+All paths below are relative to project root (`MOLCLAW_ROOT`).
 
 ### 1. Check Chrome Path
 
@@ -271,12 +271,12 @@ cat data/x-auth.json  # Should show {"authenticated": true, ...}
 
 ```bash
 npm run build
-launchctl kickstart -k gui/$(id -u)/com.bioclaw
+launchctl kickstart -k gui/$(id -u)/com.molclaw
 ```
 
 **Verify success:**
 ```bash
-launchctl list | grep bioclaw  # Should show PID and exit code 0 or -
+launchctl list | grep molclaw  # Should show PID and exit code 0 or -
 ```
 
 ## Usage via WhatsApp
@@ -342,7 +342,7 @@ echo '{"content":"Test"}' | npx tsx .claude/skills/x-integration/scripts/post.ts
 
 ```bash
 npx dotenv -e .env -- npx tsx .claude/skills/x-integration/scripts/setup.ts
-launchctl kickstart -k gui/$(id -u)/com.bioclaw
+launchctl kickstart -k gui/$(id -u)/com.molclaw
 ```
 
 ### Browser Lock Files
@@ -359,10 +359,10 @@ rm -f data/x-browser-profile/SingletonCookie
 
 ```bash
 # Host logs (relative to project root)
-grep -i "x_post\|x_like\|x_reply\|handleXIpc" logs/bioclaw.log | tail -20
+grep -i "x_post\|x_like\|x_reply\|handleXIpc" logs/molclaw.log | tail -20
 
 # Script errors
-grep -i "error\|failed" logs/bioclaw.log | tail -20
+grep -i "error\|failed" logs/molclaw.log | tail -20
 ```
 
 ### Script Timeout
@@ -402,7 +402,7 @@ If MCP tools not found in container:
 ./container/build.sh 2>&1 | grep -i skill
 
 # Check container has the file
-container run bioclaw-agent ls -la /app/src/skills/
+container run molclaw-agent ls -la /app/src/skills/
 ```
 
 ## Security

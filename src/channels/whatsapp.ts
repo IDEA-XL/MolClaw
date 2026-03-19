@@ -107,7 +107,7 @@ export class WhatsAppChannel implements Channel {
           'WhatsApp authentication required. Run /setup in Claude Code.';
         logger.error(msg);
         exec(
-          `osascript -e 'display notification "${msg}" with title "BioClaw" sound name "Basso"'`,
+          `osascript -e 'display notification "${msg}" with title "MolClaw" sound name "Basso"'`,
         );
         setTimeout(() => process.exit(1), 1000);
       }

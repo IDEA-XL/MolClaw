@@ -1,4 +1,4 @@
-# BioClaw Specification
+# MolClaw Specification
 
 A personal Claude assistant accessible via WhatsApp, with persistent memory per conversation, scheduled tasks, and email integration.
 
@@ -62,7 +62,7 @@ A personal Claude assistant accessible via WhatsApp, with persistent memory per 
 │  │    • Read, Write, Edit, Glob, Grep (file operations)           │   │
 │  │    • WebSearch, WebFetch (internet access)                     │   │
 │  │    • agent-browser (browser automation)                        │   │
-│  │    • mcp__bioclaw__* (scheduler tools via IPC)                │   │
+│  │    • mcp__molclaw__* (scheduler tools via IPC)                │   │
 │  │                                                                │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 │                                                                      │
@@ -85,7 +85,7 @@ A personal Claude assistant accessible via WhatsApp, with persistent memory per 
 ## Folder Structure
 
 ```
-bioclaw/
+molclaw/
 ├── CLAUDE.md                      # Project context for Claude Code
 ├── docs/
 │   ├── SPEC.md                    # This specification document
@@ -159,12 +159,12 @@ bioclaw/
 │   └── ipc/                       # Container IPC (messages/, tasks/)
 │
 ├── logs/                          # Runtime logs (gitignored)
-│   ├── bioclaw.log               # Host stdout
-│   └── bioclaw.error.log         # Host stderr
+│   ├── molclaw.log               # Host stdout
+│   └── molclaw.error.log         # Host stderr
 │   # Note: Per-container logs are in groups/{folder}/logs/container-*.log
 │
 └── launchd/
-    └── com.bioclaw.plist         # macOS service configuration
+    └── com.molclaw.plist         # macOS service configuration
 ```
 
 ---
@@ -187,7 +187,7 @@ export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
 // Container configuration
-export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || 'bioclaw-agent:latest';
+export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || 'molclaw-agent:latest';
 export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800000', 10); // 30min default
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min — keep container alive after last result
@@ -257,7 +257,7 @@ Or edit the default in `src/config.ts`. This changes:
 ### Placeholder Values in launchd
 
 Files with `{{PLACEHOLDER}}` values need to be configured:
-- `{{PROJECT_ROOT}}` - Absolute path to your bioclaw installation
+- `{{PROJECT_ROOT}}` - Absolute path to your molclaw installation
 - `{{NODE_PATH}}` - Path to node binary (detected via `which node`)
 - `{{HOME}}` - User's home directory
 
@@ -265,7 +265,7 @@ Files with `{{PLACEHOLDER}}` values need to be configured:
 
 ## Memory System
 
-BioClaw uses a hierarchical memory system based on CLAUDE.md files.
+MolClaw uses a hierarchical memory system based on CLAUDE.md files.
 
 ### Memory Hierarchy
 
@@ -341,7 +341,7 @@ Sessions enable conversation continuity - Claude remembers what you talked about
    ├── cwd: groups/{group-name}/
    ├── prompt: conversation history + current message
    ├── resume: session_id (for continuity)
-   └── mcpServers: bioclaw (scheduler)
+   └── mcpServers: molclaw (scheduler)
    │
    ▼
 8. Claude processes message:
@@ -398,7 +398,7 @@ This allows the agent to understand the conversation context even if it wasn't m
 
 ## Scheduled Tasks
 
-BioClaw has a built-in scheduler that runs tasks as full agents in their group's context.
+MolClaw has a built-in scheduler that runs tasks as full agents in their group's context.
 
 ### How Scheduling Works
 
@@ -420,7 +420,7 @@ BioClaw has a built-in scheduler that runs tasks as full agents in their group's
 ```
 User: @Bio remind me every Monday at 9am to review the weekly metrics
 
-Claude: [calls mcp__bioclaw__schedule_task]
+Claude: [calls mcp__molclaw__schedule_task]
         {
           "prompt": "Send a reminder to review weekly metrics. Be encouraging!",
           "schedule_type": "cron",
@@ -435,7 +435,7 @@ Claude: Done! I'll remind you every Monday at 9am.
 ```
 User: @Bio at 5pm today, send me a summary of today's emails
 
-Claude: [calls mcp__bioclaw__schedule_task]
+Claude: [calls mcp__molclaw__schedule_task]
         {
           "prompt": "Search for today's emails, summarize the important ones, and send the summary to the group.",
           "schedule_type": "once",
@@ -459,9 +459,9 @@ From main channel:
 
 ## MCP Servers
 
-### BioClaw MCP (built-in)
+### MolClaw MCP (built-in)
 
-The `bioclaw` MCP server is created dynamically per agent call with the current group's context.
+The `molclaw` MCP server is created dynamically per agent call with the current group's context.
 
 **Available Tools:**
 | Tool | Purpose |
@@ -479,12 +479,12 @@ The `bioclaw` MCP server is created dynamically per agent call with the current 
 
 ## Deployment
 
-BioClaw runs as a single macOS launchd service.
+MolClaw runs as a single macOS launchd service.
 
 ### Startup Sequence
 
-When BioClaw starts, it:
-1. **Ensures Apple Container system is running** - Automatically starts it if needed; kills orphaned BioClaw containers from previous runs
+When MolClaw starts, it:
+1. **Ensures Apple Container system is running** - Automatically starts it if needed; kills orphaned MolClaw containers from previous runs
 2. Initializes the SQLite database (migrates from JSON files if they exist)
 3. Loads state from SQLite (registered groups, sessions, router state)
 4. Connects to WhatsApp (on `connection.open`):
@@ -494,16 +494,16 @@ When BioClaw starts, it:
    - Recovers any unprocessed messages from before shutdown
    - Starts the message polling loop
 
-### Service: com.bioclaw
+### Service: com.molclaw
 
-**launchd/com.bioclaw.plist:**
+**launchd/com.molclaw.plist:**
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "...">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.bioclaw</string>
+    <string>com.molclaw</string>
     <key>ProgramArguments</key>
     <array>
         <string>{{NODE_PATH}}</string>
@@ -525,9 +525,9 @@ When BioClaw starts, it:
         <string>Bio</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>{{PROJECT_ROOT}}/logs/bioclaw.log</string>
+    <string>{{PROJECT_ROOT}}/logs/molclaw.log</string>
     <key>StandardErrorPath</key>
-    <string>{{PROJECT_ROOT}}/logs/bioclaw.error.log</string>
+    <string>{{PROJECT_ROOT}}/logs/molclaw.error.log</string>
 </dict>
 </plist>
 ```
@@ -536,19 +536,19 @@ When BioClaw starts, it:
 
 ```bash
 # Install service
-cp launchd/com.bioclaw.plist ~/Library/LaunchAgents/
+cp launchd/com.molclaw.plist ~/Library/LaunchAgents/
 
 # Start service
-launchctl load ~/Library/LaunchAgents/com.bioclaw.plist
+launchctl load ~/Library/LaunchAgents/com.molclaw.plist
 
 # Stop service
-launchctl unload ~/Library/LaunchAgents/com.bioclaw.plist
+launchctl unload ~/Library/LaunchAgents/com.molclaw.plist
 
 # Check status
-launchctl list | grep bioclaw
+launchctl list | grep molclaw
 
 # View logs
-tail -f logs/bioclaw.log
+tail -f logs/molclaw.log
 ```
 
 ---
@@ -604,8 +604,8 @@ chmod 700 groups/
 
 | Issue | Cause | Solution |
 |-------|-------|----------|
-| No response to messages | Service not running | Check `launchctl list | grep bioclaw` |
-| "Claude Code process exited with code 1" | Apple Container failed to start | Check logs; BioClaw auto-starts container system but may fail |
+| No response to messages | Service not running | Check `launchctl list | grep molclaw` |
+| "Claude Code process exited with code 1" | Apple Container failed to start | Check logs; MolClaw auto-starts container system but may fail |
 | "Claude Code process exited with code 1" | Session mount path wrong | Ensure mount is to `/home/node/.claude/` not `/root/.claude/` |
 | Session not continuing | Session ID not saved | Check SQLite: `sqlite3 store/messages.db "SELECT * FROM sessions"` |
 | Session not continuing | Mount path mismatch | Container user is `node` with HOME=/home/node; sessions must be at `/home/node/.claude/` |
@@ -614,8 +614,8 @@ chmod 700 groups/
 
 ### Log Location
 
-- `logs/bioclaw.log` - stdout
-- `logs/bioclaw.error.log` - stderr
+- `logs/molclaw.log` - stdout
+- `logs/molclaw.error.log` - stderr
 
 ### Debug Mode
 

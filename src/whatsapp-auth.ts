@@ -164,7 +164,7 @@ async function connectSocket(phoneNumber?: string): Promise<void> {
       try { fs.unlinkSync(QR_FILE); } catch {}
       console.log('\n✓ Successfully authenticated with WhatsApp!');
       console.log('  Credentials saved to store/auth/');
-      console.log('  You can now start the BioClaw service.\n');
+      console.log('  You can now start the MolClaw service.\n');
 
       setTimeout(() => process.exit(0), 2000);
     }

@@ -1,4 +1,4 @@
-# BioClaw Agent Container
+# MolClaw Agent Container
 # Runs Claude Agent SDK in isolated Linux VM with biology tools and browser automation
 
 ARG BASE_IMAGE=node:22-slim
@@ -9,7 +9,7 @@ RUN sed -i \
     -e 's|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/debian|g' \
     -e 's|http://deb.debian.org/debian-security|http://mirrors.tuna.tsinghua.edu.cn/debian-security|g' \
     /etc/apt/sources.list.d/debian.sources
-RUN printf 'Acquire::Retries "10";\nAcquire::http::Pipeline-Depth "0";\nAcquire::http::No-Cache "true";\nAcquire::BrokenProxy "true";\n' > /etc/apt/apt.conf.d/99bioclaw-network
+RUN printf 'Acquire::Retries "10";\nAcquire::http::Pipeline-Depth "0";\nAcquire::http::No-Cache "true";\nAcquire::BrokenProxy "true";\n' > /etc/apt/apt.conf.d/99molclaw-network
 
 # Install system dependencies for Chromium + bio tools
 RUN apt-get update && apt-get install --fix-missing -y \
@@ -115,8 +115,8 @@ RUN printf '%s\n' \
   '#!/bin/bash' \
   'set -euo pipefail' \
   '' \
-  'OUT_DIR="$(mktemp -d /tmp/bioclaw-dist-XXXXXX)"' \
-  'INPUT_FILE="$(mktemp /tmp/bioclaw-input-XXXXXX.json)"' \
+  'OUT_DIR="$(mktemp -d /tmp/molclaw-dist-XXXXXX)"' \
+  'INPUT_FILE="$(mktemp /tmp/molclaw-input-XXXXXX.json)"' \
   '' \
   'cleanup() {' \
   '  rm -f "$INPUT_FILE"' \
@@ -131,9 +131,9 @@ RUN printf '%s\n' \
   'cat > "$INPUT_FILE"' \
   '' \
   'if [ ! -s "$INPUT_FILE" ]; then' \
-  "  echo '---BIOCLAW_OUTPUT_START---'" \
+  "  echo '---MOLCLAW_OUTPUT_START---'" \
   "  echo '{\"status\":\"error\",\"result\":null,\"error\":\"No stdin input provided. Pass container input JSON via stdin.\"}'" \
-  "  echo '---BIOCLAW_OUTPUT_END---'" \
+  "  echo '---MOLCLAW_OUTPUT_END---'" \
   '  exit 1' \
   'fi' \
   '' \

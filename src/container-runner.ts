@@ -1,5 +1,5 @@
 /**
- * Container Runner for BioClaw
+ * Container Runner for MolClaw
  * Spawns agent execution in Docker container and handles IPC
  */
 import { ChildProcess, exec, spawn } from 'child_process';
@@ -20,8 +20,8 @@ import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
-const OUTPUT_START_MARKER = '---BIOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---BIOCLAW_OUTPUT_END---';
+const OUTPUT_START_MARKER = '---MOLCLAW_OUTPUT_START---';
+const OUTPUT_END_MARKER = '---MOLCLAW_OUTPUT_END---';
 
 function getHomeDir(): string {
   const home = process.env.HOME || os.homedir();
@@ -349,10 +349,10 @@ function readSecrets(): Record<string, string> {
     'OPENAI_COMPAT_SUPPORTS_IMAGE',
     'OPENAI_COMPAT_INLINE_IMAGE_MAX_BYTES',
     'OPENAI_COMPAT_INLINE_IMAGE_MAX_COUNT',
-    'BIOCLAW_DURABLE_MEMORY_PINNED_TOKENS',
-    'BIOCLAW_DURABLE_MEMORY_RECENT_TOKENS',
-    'BIOCLAW_DURABLE_MEMORY_MATCHED_TOKENS',
-    'BIOCLAW_SESSION_SUMMARY_TOKENS',
+    'MOLCLAW_DURABLE_MEMORY_PINNED_TOKENS',
+    'MOLCLAW_DURABLE_MEMORY_RECENT_TOKENS',
+    'MOLCLAW_DURABLE_MEMORY_MATCHED_TOKENS',
+    'MOLCLAW_SESSION_SUMMARY_TOKENS',
     'LLM_BASE_URL',
     'LLM_API_KEY',
     'LLM_MODEL',
@@ -450,7 +450,7 @@ export async function runContainerAgent(
 
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
-  const containerName = `bioclaw-${safeName}-${Date.now()}`;
+  const containerName = `molclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
 
   logger.debug(

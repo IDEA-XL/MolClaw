@@ -1,6 +1,6 @@
 #!/usr/bin/env npx tsx
 /**
- * BioClaw Group Management CLI
+ * MolClaw Group Management CLI
  *
  * Usage:
  *   npx tsx scripts/manage-groups.ts list          — Show registered groups
@@ -19,7 +19,7 @@ const DB_PATH = path.join(STORE_DIR, 'messages.db');
 
 if (!fs.existsSync(DB_PATH)) {
   console.error(`Database not found at ${DB_PATH}`);
-  console.error('Make sure BioClaw has been started at least once.');
+  console.error('Make sure MolClaw has been started at least once.');
   process.exit(1);
 }
 
@@ -109,8 +109,8 @@ async function registerGroup() {
 
   const name = (await prompt(`Group display name [${defaultName}]: `)) || defaultName;
   const folder = (await prompt(`Folder name [${defaultFolder}]: `)) || defaultFolder;
-  const triggerInput = await prompt('Trigger pattern [@Bioclaw]: ');
-  const trigger = triggerInput || '@Bioclaw';
+  const triggerInput = await prompt('Trigger pattern [@MolClaw]: ');
+  const trigger = triggerInput || '@MolClaw';
   const reqTrigger = (await prompt('Require trigger? (y/n) [y]: ')) || 'y';
 
   db.prepare(
@@ -123,7 +123,7 @@ async function registerGroup() {
   fs.mkdirSync(groupDir, { recursive: true });
 
   console.log(`\nRegistered "${name}" (${selected.jid}) -> folder: ${folder}`);
-  console.log('Restart BioClaw for the change to take effect.\n');
+  console.log('Restart MolClaw for the change to take effect.\n');
 }
 
 function removeGroup(jid: string) {
@@ -133,7 +133,7 @@ function removeGroup(jid: string) {
     return;
   }
   db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
-  console.log(`\nRemoved "${row.name}" (${jid}). Restart BioClaw for the change to take effect.\n`);
+  console.log(`\nRemoved "${row.name}" (${jid}). Restart MolClaw for the change to take effect.\n`);
 }
 
 const [command, ...args] = process.argv.slice(2);
@@ -157,7 +157,7 @@ switch (command) {
     break;
   default:
     console.log(`
-BioClaw Group Management
+MolClaw Group Management
 
 Commands:
   list        Show registered groups (bot will reply here)

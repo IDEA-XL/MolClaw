@@ -5,7 +5,7 @@ description: Run BLAST sequence similarity searches. Use when the user asks to B
 
 # BLAST Search
 
-Run NCBI BLAST+ searches inside the BioClaw container.
+Run NCBI BLAST+ searches inside the MolClaw container.
 
 ## When to Use
 

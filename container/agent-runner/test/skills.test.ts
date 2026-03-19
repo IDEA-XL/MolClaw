@@ -20,7 +20,7 @@ import {
 const tempDirs: string[] = [];
 
 function createTempDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bioclaw-skills-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'molclaw-skills-'));
   tempDirs.push(dir);
   return dir;
 }
@@ -62,7 +62,7 @@ Review the code carefully.
     const parsed = parseClaudeSkillContent(
       `# Add Parallel AI Integration
 
-Adds Parallel AI MCP integration to BioClaw for advanced web research capabilities.
+Adds Parallel AI MCP integration to MolClaw for advanced web research capabilities.
 
 ## Implementation Steps
 
@@ -74,7 +74,7 @@ Do the work.
     expect(parsed.frontmatter.name).toBe('add-parallel');
     expect(parsed.frontmatter.displayName).toBe('Add Parallel AI Integration');
     expect(parsed.frontmatter.description).toBe(
-      'Adds Parallel AI MCP integration to BioClaw for advanced web research capabilities.',
+      'Adds Parallel AI MCP integration to MolClaw for advanced web research capabilities.',
     );
     expect(parsed.body).toContain('## Implementation Steps');
   });

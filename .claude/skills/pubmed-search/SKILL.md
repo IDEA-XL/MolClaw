@@ -20,7 +20,7 @@ Search NCBI PubMed for scientific literature using BioPython's Entrez module.
 
 ```python
 from Bio import Entrez
-Entrez.email = "bioclaw@example.com"
+Entrez.email = "molclaw@example.com"
 ```
 
 ### 2. Search PubMed

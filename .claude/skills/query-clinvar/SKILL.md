@@ -20,7 +20,7 @@ Query NCBI ClinVar for clinical significance of genetic variants.
 from Bio import Entrez
 import json
 
-Entrez.email = "bioclaw@example.com"
+Entrez.email = "molclaw@example.com"
 
 # 1. Search ClinVar
 def search_clinvar(query, max_results=10):

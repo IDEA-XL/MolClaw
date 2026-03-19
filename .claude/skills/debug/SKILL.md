@@ -3,7 +3,7 @@ name: debug
 description: Debug container agent issues. Use when things aren't working, container fails, authentication problems, or to understand how the container system works. Covers logs, environment variables, mounts, and common issues.
 ---
 
-# BioClaw Container Debugging
+# MolClaw Container Debugging
 
 This guide covers debugging the containerized agent execution system.
 
@@ -30,8 +30,8 @@ src/container-runner.ts               container/agent-runner/
 
 | Log | Location | Content |
 |-----|----------|---------|
-| **Main app logs** | `logs/bioclaw.log` | Host-side WhatsApp, routing, container spawning |
-| **Main app errors** | `logs/bioclaw.error.log` | Host-side errors |
+| **Main app logs** | `logs/molclaw.log` | Host-side WhatsApp, routing, container spawning |
+| **Main app errors** | `logs/molclaw.error.log` | Host-side errors |
 | **Container run logs** | `groups/{folder}/logs/container-*.log` | Per-run: input, mounts, stderr, stdout |
 | **Claude sessions** | `~/.claude/projects/` | Claude Code session history |
 
@@ -88,7 +88,7 @@ To verify env vars are reaching the container:
 ```bash
 echo '{}' | container run -i \
   --mount type=bind,source=$(pwd)/data/env,target=/workspace/env-dir,readonly \
-  --entrypoint /bin/bash bioclaw-agent:latest \
+  --entrypoint /bin/bash molclaw-agent:latest \
   -c 'export $(cat /workspace/env-dir/env | xargs); echo "OAuth: ${#CLAUDE_CODE_OAUTH_TOKEN} chars, API: ${#ANTHROPIC_API_KEY} chars"'
 ```
 
@@ -107,7 +107,7 @@ echo '{}' | container run -i \
 
 To check what's mounted inside a container:
 ```bash
-container run --rm --entrypoint /bin/bash bioclaw-agent:latest -c 'ls -la /workspace/'
+container run --rm --entrypoint /bin/bash molclaw-agent:latest -c 'ls -la /workspace/'
 ```
 
 Expected structure:
@@ -129,7 +129,7 @@ Expected structure:
 
 The container runs as user `node` (uid 1000). Check ownership:
 ```bash
-container run --rm --entrypoint /bin/bash bioclaw-agent:latest -c '
+container run --rm --entrypoint /bin/bash molclaw-agent:latest -c '
   whoami
   ls -la /workspace/
   ls -la /app/
@@ -154,7 +154,7 @@ grep -A3 "Claude sessions" src/container-runner.ts
 ```bash
 container run --rm --entrypoint /bin/bash \
   -v ~/.claude:/home/node/.claude \
-  bioclaw-agent:latest -c '
+  molclaw-agent:latest -c '
 echo "HOME=$HOME"
 ls -la $HOME/.claude/projects/ 2>&1 | head -5
 '
@@ -187,14 +187,14 @@ echo '{"prompt":"What is 2+2?","groupFolder":"test","chatJid":"test@g.us","isMai
   --mount "type=bind,source=$(pwd)/data/env,target=/workspace/env-dir,readonly" \
   -v $(pwd)/groups/test:/workspace/group \
   -v $(pwd)/data/ipc:/workspace/ipc \
-  bioclaw-agent:latest
+  molclaw-agent:latest
 ```
 
 ### Test Claude Code directly:
 ```bash
 container run --rm --entrypoint /bin/bash \
   --mount "type=bind,source=$(pwd)/data/env,target=/workspace/env-dir,readonly" \
-  bioclaw-agent:latest -c '
+  molclaw-agent:latest -c '
   export $(cat /workspace/env-dir/env | xargs)
   claude -p "Say hello" --dangerously-skip-permissions --allowedTools ""
 '
@@ -202,7 +202,7 @@ container run --rm --entrypoint /bin/bash \
 
 ### Interactive shell in container:
 ```bash
-container run --rm -it --entrypoint /bin/bash bioclaw-agent:latest
+container run --rm -it --entrypoint /bin/bash molclaw-agent:latest
 ```
 
 ## SDK Options Reference
@@ -246,7 +246,7 @@ container builder prune -af
 container images
 
 # Check what's in the image
-container run --rm --entrypoint /bin/bash bioclaw-agent:latest -c '
+container run --rm --entrypoint /bin/bash molclaw-agent:latest -c '
   echo "=== Node version ==="
   node --version
 
@@ -276,13 +276,13 @@ rm -rf data/sessions/
 # Clear sessions for a specific group
 rm -rf data/sessions/{groupFolder}/.claude/
 
-# Also clear the session ID from BioClaw's tracking (stored in SQLite)
+# Also clear the session ID from MolClaw's tracking (stored in SQLite)
 sqlite3 store/messages.db "DELETE FROM sessions WHERE group_folder = '{groupFolder}'"
 ```
 
 To verify session resumption is working, check the logs for the same session ID across messages:
 ```bash
-grep "Session initialized" logs/bioclaw.log | tail -5
+grep "Session initialized" logs/molclaw.log | tail -5
 # Should show the SAME session ID for consecutive messages in the same group
 ```
 
@@ -318,7 +318,7 @@ cat data/ipc/{groupFolder}/current_tasks.json
 Run this to check common issues:
 
 ```bash
-echo "=== Checking BioClaw Container Setup ==="
+echo "=== Checking MolClaw Container Setup ==="
 
 echo -e "\n1. Authentication configured?"
 [ -f .env ] && (grep -q "CLAUDE_CODE_OAUTH_TOKEN=sk-" .env || grep -q "ANTHROPIC_API_KEY=sk-" .env) && echo "OK" || echo "MISSING - add CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY to .env"
@@ -327,10 +327,10 @@ echo -e "\n2. Env file copied for container?"
 [ -f data/env/env ] && echo "OK" || echo "MISSING - will be created on first run"
 
 echo -e "\n3. Apple Container system running?"
-container system status &>/dev/null && echo "OK" || echo "NOT RUNNING - BioClaw should auto-start it; check logs"
+container system status &>/dev/null && echo "OK" || echo "NOT RUNNING - MolClaw should auto-start it; check logs"
 
 echo -e "\n4. Container image exists?"
-echo '{}' | container run -i --entrypoint /bin/echo bioclaw-agent:latest "OK" 2>/dev/null || echo "MISSING - run ./container/build.sh"
+echo '{}' | container run -i --entrypoint /bin/echo molclaw-agent:latest "OK" 2>/dev/null || echo "MISSING - run ./container/build.sh"
 
 echo -e "\n5. Session mount path correct?"
 grep -q "/home/node/.claude" src/container-runner.ts 2>/dev/null && echo "OK" || echo "WRONG - should mount to /home/node/.claude/, not /root/.claude/"
@@ -342,6 +342,6 @@ echo -e "\n7. Recent container logs?"
 ls -t groups/*/logs/container-*.log 2>/dev/null | head -3 || echo "No container logs yet"
 
 echo -e "\n8. Session continuity working?"
-SESSIONS=$(grep "Session initialized" logs/bioclaw.log 2>/dev/null | tail -5 | awk '{print $NF}' | sort -u | wc -l)
+SESSIONS=$(grep "Session initialized" logs/molclaw.log 2>/dev/null | tail -5 | awk '{print $NF}' | sort -u | wc -l)
 [ "$SESSIONS" -le 2 ] && echo "OK (recent sessions reusing IDs)" || echo "CHECK - multiple different session IDs, may indicate resumption issues"
 ```

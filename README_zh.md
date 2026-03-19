@@ -1,4 +1,4 @@
-# BioClaw 🧬
+# MolClaw 🧬
 
 **WhatsApp 上的 AI 生物学研究助手。** 直接在手机上运行 BLAST 搜索、序列分析、基因组数据处理。
 
@@ -47,8 +47,8 @@
 ## 快速开始
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/BioClaw.git
-cd BioClaw
+git clone https://github.com/YOUR_USERNAME/MolClaw.git
+cd MolClaw
 claude
 ```
 

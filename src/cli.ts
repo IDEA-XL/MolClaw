@@ -1,5 +1,5 @@
 /**
- * BioClaw CLI Mode
+ * MolClaw CLI Mode
  * Test the agent locally without WhatsApp.
  * Usage: npm run cli
  */
@@ -147,8 +147,8 @@ async function runAgent(prompt: string): Promise<string> {
       stdout += chunk;
 
       // Parse streaming output markers
-      const startMarker = '---BIOCLAW_OUTPUT_START---';
-      const endMarker = '---BIOCLAW_OUTPUT_END---';
+      const startMarker = '---MOLCLAW_OUTPUT_START---';
+      const endMarker = '---MOLCLAW_OUTPUT_END---';
       let startIdx: number;
       while ((startIdx = stdout.indexOf(startMarker)) !== -1) {
         const endIdx = stdout.indexOf(endMarker, startIdx);
@@ -181,7 +181,7 @@ async function runAgent(prompt: string): Promise<string> {
 
     container.on('close', (code) => {
       clearTimeout(timeout);
-      if (code !== 0 && !stdout.includes('BIOCLAW_OUTPUT')) {
+      if (code !== 0 && !stdout.includes('MOLCLAW_OUTPUT')) {
         resolve(`[Error: container exited with code ${code}]`);
       } else {
         resolve('');
@@ -193,7 +193,7 @@ async function runAgent(prompt: string): Promise<string> {
 async function main() {
   console.log('');
   console.log('========================================');
-  console.log('  BioClaw - Biology Research Assistant');
+  console.log('  MolClaw - Biology Research Assistant');
   console.log('  CLI Test Mode (Docker + Container Agent)');
   console.log('========================================');
   console.log('');

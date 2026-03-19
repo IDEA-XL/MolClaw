@@ -8,7 +8,7 @@
 
 ## Skills
 
-A [skill](https://code.claude.com/docs/en/skills) is a markdown file in `.claude/skills/` that teaches Claude Code how to transform a BioClaw installation.
+A [skill](https://code.claude.com/docs/en/skills) is a markdown file in `.claude/skills/` that teaches Claude Code how to transform a MolClaw installation.
 
 A PR that contributes a skill should not modify any source files.
 

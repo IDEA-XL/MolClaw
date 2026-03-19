@@ -3,16 +3,16 @@ import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 
 // Sentinel markers must match container-runner.ts
-const OUTPUT_START_MARKER = '---BIOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---BIOCLAW_OUTPUT_END---';
+const OUTPUT_START_MARKER = '---MOLCLAW_OUTPUT_START---';
+const OUTPUT_END_MARKER = '---MOLCLAW_OUTPUT_END---';
 
 // Mock config
 vi.mock('./config.js', () => ({
-  CONTAINER_IMAGE: 'bioclaw-agent:latest',
+  CONTAINER_IMAGE: 'molclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
-  DATA_DIR: '/tmp/bioclaw-test-data',
-  GROUPS_DIR: '/tmp/bioclaw-test-groups',
+  DATA_DIR: '/tmp/molclaw-test-data',
+  GROUPS_DIR: '/tmp/molclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
 }));
 

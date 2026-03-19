@@ -1,5 +1,5 @@
 /**
- * Non-interactive CLI test: sends a single prompt to BioClaw container and prints output.
+ * Non-interactive CLI test: sends a single prompt to MolClaw container and prints output.
  */
 import fs from 'fs';
 import path from 'path';
@@ -63,7 +63,7 @@ function readSecrets(): Record<string, string> {
 async function main() {
   const prompt = process.argv[2] || 'Use BioPython to translate DNA sequence ATGGAGGAGCCGCAGTCAGATCCTAGCG to protein and calculate its GC content. Write a python script, run it, and show the output.';
 
-  console.log(`\n[BioClaw CLI Test]`);
+  console.log(`\n[MolClaw CLI Test]`);
   console.log(`Prompt: ${prompt}\n`);
 
   ensureDirs();
@@ -110,8 +110,8 @@ async function main() {
     stdout += chunk;
     process.stdout.write(chunk);
 
-    const startMarker = '---BIOCLAW_OUTPUT_START---';
-    const endMarker = '---BIOCLAW_OUTPUT_END---';
+    const startMarker = '---MOLCLAW_OUTPUT_START---';
+    const endMarker = '---MOLCLAW_OUTPUT_END---';
     let startIdx: number;
     while ((startIdx = stdout.indexOf(startMarker)) !== -1) {
       const endIdx = stdout.indexOf(endMarker, startIdx);
@@ -147,7 +147,7 @@ async function main() {
     clearTimeout(killTimer);
     console.log(`\nContainer exited with code ${code}`);
     if (!resultFound) {
-      console.log('No BIOCLAW_OUTPUT markers found in stdout.');
+      console.log('No MOLCLAW_OUTPUT markers found in stdout.');
       console.log('Raw stdout tail:', stdout.slice(-500));
     }
     process.exit(code ?? 1);

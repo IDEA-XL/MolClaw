@@ -1,9 +1,9 @@
 /**
- * BioClaw Agent Runner
+ * MolClaw Agent Runner
  * Runs inside a container, receives config via stdin, outputs result to stdout.
  *
  * This runner talks to an OpenAI-compatible `/chat/completions` endpoint and
- * implements a small tool runtime directly, so BioClaw can work with gateway
+ * implements a small tool runtime directly, so MolClaw can work with gateway
  * providers instead of Anthropic's SDK.
  */
 
@@ -333,8 +333,8 @@ const PROXY_ENV_KEYS = [
 
 const exec = promisify(execCallback);
 
-const OUTPUT_START_MARKER = '---BIOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---BIOCLAW_OUTPUT_END---';
+const OUTPUT_START_MARKER = '---MOLCLAW_OUTPUT_START---';
+const OUTPUT_END_MARKER = '---MOLCLAW_OUTPUT_END---';
 
 const IPC_DIR = '/workspace/ipc';
 const IPC_INPUT_DIR = path.join(IPC_DIR, 'input');
@@ -364,14 +364,14 @@ const DEFAULT_INLINE_IMAGE_MAX_COUNT = 3;
 const ROLLING_SUMMARY_TRIGGER_TOKENS = Math.max(
   4_000,
   parseInt(
-    process.env.BIOCLAW_ROLLING_SUMMARY_TRIGGER_TOKENS || '24000',
+    process.env.MOLCLAW_ROLLING_SUMMARY_TRIGGER_TOKENS || '24000',
     10,
   ) || 24_000,
 );
 const ROLLING_SUMMARY_TAIL_MESSAGES = Math.max(
   4,
   parseInt(
-    process.env.BIOCLAW_ROLLING_SUMMARY_TAIL_MESSAGES || '10',
+    process.env.MOLCLAW_ROLLING_SUMMARY_TAIL_MESSAGES || '10',
     10,
   ) || 10,
 );
@@ -2461,7 +2461,7 @@ function buildSystemPrompt(containerInput: ContainerInput): string {
       'Keep WhatsApp replies clean: no markdown headings, prefer short paragraphs or bullet lists.',
       'Tool results and user messages may include <system-reminder> tags. These tags contain internal reminders and are not part of the user request.',
       'If part of your output is internal reasoning, wrap it in <internal> tags.',
-      'Legacy references to mcp__bioclaw__send_message or mcp__bioclaw__send_image map to send_message and send_image in this runtime.',
+      'Legacy references to mcp__molclaw__send_message or mcp__molclaw__send_image map to send_message and send_image in this runtime.',
       'Your writable workspace is primarily /workspace/group. The main group can also modify /workspace/project.',
     ].join('\n'),
     ...loadPromptFragments(containerInput),
@@ -2502,28 +2502,28 @@ function getPromptMemoryBudgetConfig(
   return {
     pinnedTokens: readBoundedIntegerConfig(
       containerInput,
-      ['BIOCLAW_DURABLE_MEMORY_PINNED_TOKENS'],
+      ['MOLCLAW_DURABLE_MEMORY_PINNED_TOKENS'],
       1_000,
       200,
       6_000,
     ),
     recentTokens: readBoundedIntegerConfig(
       containerInput,
-      ['BIOCLAW_DURABLE_MEMORY_RECENT_TOKENS'],
+      ['MOLCLAW_DURABLE_MEMORY_RECENT_TOKENS'],
       800,
       200,
       6_000,
     ),
     matchedTokens: readBoundedIntegerConfig(
       containerInput,
-      ['BIOCLAW_DURABLE_MEMORY_MATCHED_TOKENS'],
+      ['MOLCLAW_DURABLE_MEMORY_MATCHED_TOKENS'],
       1_400,
       200,
       8_000,
     ),
     sessionSummaryTokens: readBoundedIntegerConfig(
       containerInput,
-      ['BIOCLAW_SESSION_SUMMARY_TOKENS'],
+      ['MOLCLAW_SESSION_SUMMARY_TOKENS'],
       2_000,
       200,
       8_000,
